@@ -4,6 +4,9 @@ const debug = std.debug;
 pub const Color = @import("fmt/color.zig");
 const config = @import("../cmd/config.zig");
 
+// Global logger switch. Set to true only when you want verbose tracing.
+pub const ENABLE_LOG: bool = false;
+
 pub const Error = error{
     Memory,
     FormattingError,
@@ -185,7 +188,7 @@ pub const Log = union(Message) {
 
     /// Logs a message based on the type of message
     pub fn log(self: @This(), comptime fmt: []const u8, args: anytype) void {
-        // if (!config.getDebug())
+        if (!ENABLE_LOG) return;
         return switch (self) {
             Log.warning => |e| {
                 if (!e.debug) return;

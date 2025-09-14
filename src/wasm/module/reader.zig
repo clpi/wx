@@ -26,6 +26,43 @@ pub fn readLEB128(self: *Reader) !u32 {
     return result;
 }
 
+// Read signed LEB128 into i32
+pub fn readSLEB32(self: *Reader) !i32 {
+    var result: i32 = 0;
+    var shift: u5 = 0;
+    var byte: u8 = 0;
+    while (true) {
+        byte = try self.readByte();
+        const low = @as(i32, @intCast(byte & 0x7F));
+        result |= (low << shift);
+        shift += 7;
+        if (byte & 0x80 == 0) break;
+    }
+    // sign extend if needed
+    if (shift < 32 and (byte & 0x40) != 0) {
+        result |= @as(i32, -1) << shift;
+    }
+    return result;
+}
+
+// Read signed LEB128 into i64
+pub fn readSLEB64(self: *Reader) !i64 {
+    var result: i64 = 0;
+    var shift: u6 = 0;
+    var byte: u8 = 0;
+    while (true) {
+        byte = try self.readByte();
+        const low = @as(i64, @intCast(byte & 0x7F));
+        result |= (low << shift);
+        shift += 7;
+        if (byte & 0x80 == 0) break;
+    }
+    if (shift < 64 and (byte & 0x40) != 0) {
+        result |= @as(i64, -1) << shift;
+    }
+    return result;
+}
+
 pub fn readBytes(self: *Reader, len: usize) ![]const u8 {
     if (self.pos + len > self.bytes.len) return error.EndOfStream;
     const slice = self.bytes[self.pos .. self.pos + len];

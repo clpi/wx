@@ -6,6 +6,7 @@ const Runtime = @This();
 const Log = @import("../util/fmt.zig").Log;
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const SmallVec = @import("stack.zig").SmallVec;
 
 pub const value = @import("value.zig");
 pub const Value = @import("value.zig").Value;
@@ -19,10 +20,29 @@ pub const Error = @import("op.zig").Error;
 const Function = Module.Function;
 const BlockType = Block.Type;
 const BytecodeReader = Module.Reader;
+inline fn asI32(v: Value) i32 {
+    return switch (@as(ValueType, std.meta.activeTag(v))) {
+        .i32 => v.i32,
+        .i64 => @intCast(v.i64),
+        .f32 => @intFromFloat(v.f32),
+        .f64 => @intFromFloat(v.f64),
+        else => 0,
+    };
+}
+
+inline fn asU32(v: Value) u32 {
+    return @as(u32, @bitCast(asI32(v)));
+}
+const FunctionSummary = struct {
+    code_len: usize,
+    block_count: usize,
+};
 
 debug: bool = false,
+validate: bool = true,
 allocator: Allocator,
-stack: std.ArrayList(Value),
+stack: SmallVec(Value, 256),
+block_stack: SmallVec(Block, 64),
 module: ?*Module,
 wasi: ?WASI = null,
 
@@ -30,14 +50,28 @@ wasi: ?WASI = null,
 // Maps instruction positions to their containing block index
 // This helps avoid expensive linear searches
 block_position_map: std.AutoHashMap(usize, usize),
+function_summary: std.AutoHashMap(usize, FunctionSummary),
+// Debug tracking for last executed opcode
+last_opcode: u8 = 0,
+last_pos: usize = 0,
 
 pub fn init(allocator: Allocator) !*Runtime {
     const runtime = try allocator.create(Runtime);
     runtime.* = Runtime{
         .allocator = allocator,
-        .stack = std.ArrayList(Value).init(allocator),
-        .block_position_map = std.AutoHashMap(usize, usize).init(allocator),
+        .stack = undefined,
+        .block_stack = undefined,
+        .block_position_map = undefined,
+        .module = null,
+        .debug = false,
+        .validate = true,
+        .function_summary = undefined,
     };
+    // Initialize small-vector stacks
+    runtime.stack = SmallVec(Value, 256).init();
+    runtime.block_stack = SmallVec(Block, 64).init();
+    runtime.block_position_map = std.AutoHashMap(usize, usize).init(allocator);
+    runtime.function_summary = std.AutoHashMap(usize, FunctionSummary).init(allocator);
     return runtime;
 }
 
@@ -49,7 +83,6 @@ pub fn deinit(self: *Runtime) void {
     if (self.wasi) |*wasi| {
         o.log("Freeing WASI resources", .{});
         wasi.deinit();
-        self.allocator.destroy(wasi);
         self.wasi = null;
     }
 
@@ -62,17 +95,19 @@ pub fn deinit(self: *Runtime) void {
 
     // Free stack resources
     o.log("Freeing stack with {d} items", .{self.stack.items.len});
-    self.stack.deinit();
+    self.stack.deinit(self.allocator);
 
-    // Free block stack resources (not freed in original implementation)
-    if (@hasField(@TypeOf(self.*), "block_stack")) {
-        o.log("Freeing block stack", .{});
-        self.block_stack.deinit();
-    }
+    // Free block stack resources
+    o.log("Freeing block stack", .{});
+    self.block_stack.deinit(self.allocator);
 
     // Free block position map
     o.log("Freeing block position map", .{});
     self.block_position_map.deinit();
+
+    // Free function summaries
+    o.log("Freeing function summaries", .{});
+    self.function_summary.deinit();
 
     o.log("Runtime cleanup complete", .{});
 }
@@ -85,13 +120,27 @@ pub fn loadModule(self: *Runtime, bytes: []const u8) !*Module {
     const module = try Module.parse(self.allocator, bytes);
     self.module = module;
 
-    // Validate the module before execution
-    o.log("Validating module", .{});
-    try module.validateModule();
+    // Validate the module before execution (can be disabled)
+    if (self.validate) {
+        o.log("Validating module", .{});
+        try module.validateModule();
+    }
 
-    // Create block stack for execution
-    if (!@hasField(@TypeOf(self.*), "block_stack")) {
-        self.block_stack = std.ArrayList(Block).init(self.allocator);
+    // Precompute light function summaries for validator/execution
+    try self.function_summary.ensureTotalCapacity(@intCast(module.functions.items.len));
+    for (module.functions.items, 0..) |f, idx| {
+        if (f.imported) continue;
+        const code = f.code;
+        var blocks: usize = 0;
+        var i: usize = 0;
+        while (i < code.len) : (i += 1) {
+            const b = code[i];
+            switch (b) {
+                0x02, 0x03, 0x04 => blocks += 1, // block/loop/if
+                else => {},
+            }
+        }
+        try self.function_summary.put(idx, .{ .code_len = code.len, .block_count = blocks });
     }
 
     o.log("Module loaded and validated successfully", .{});
@@ -105,10 +154,38 @@ pub fn setupWASI(self: *Runtime, args: [][:0]u8) !void {
     }
 
     self.wasi = try WASI.init(self.allocator, args);
+    // Propagate runtime debug into WASI to control logging
+    self.wasi.?.debug = self.debug;
 
     if (self.module) |module| {
         try self.wasi.?.setupModule(self, module);
     }
+}
+
+// ===== Fast memory helpers =====
+inline fn memOrError(self: *Runtime) ![]u8 {
+    const module = self.module orelse return Error.InvalidAccess;
+    if (module.memory == null) return Error.InvalidAccess;
+    return module.memory.?;
+}
+
+inline fn effAddr(base: i32, offset: usize) !usize {
+    if (base < 0) return Error.InvalidAccess;
+    return @as(usize, @intCast(base)) + offset;
+}
+
+inline fn readLittle(self: *Runtime, comptime T: type, addr: usize) !T {
+    const m = try self.memOrError();
+    const size = @sizeOf(T);
+    if (addr + size > m.len) return Error.InvalidAccess;
+    return std.mem.readInt(T, m[addr..][0..size], .little);
+}
+
+inline fn writeLittle(self: *Runtime, comptime T: type, addr: usize, v: T) !void {
+    const m = try self.memOrError();
+    const size = @sizeOf(T);
+    if (addr + size > m.len) return Error.InvalidAccess;
+    std.mem.writeInt(T, m[addr..][0..size], v, .little);
 }
 
 pub fn handleImport(self: *Runtime, module_name: []const u8, field_name: []const u8, args: []const Value) !Value {
@@ -239,10 +316,8 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
     const func_type = module.types.items[func.type_index];
 
     var oe = Log.op("executeFunction", "");
-    if (self.wasi) |*wasi| {
-        if (wasi.debug) {
-            oe.log("\nExecuting function {d} with {d} params, {d} locals\n", .{ func_index, args.len, func.locals.len });
-        }
+    if (self.debug) {
+        std.debug.print("[wx] enter func {d}, params={d}, locals={d}, codelen={d}\n", .{ func_index, args.len, func.locals.len, func.code.len });
     }
 
     // Type check arguments
@@ -255,18 +330,30 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
     // If this is an imported function, find and call the import
     if (func.imported) {
-        // Find the import for this function
+        // Imported functions occupy the lowest function indices in the same
+        // order as they appear in the import section. Map func_index to the
+        // corresponding import by ordinal.
+        var ordinal: usize = 0;
+        var i: usize = 0;
+        while (i < func_index) : (i += 1) {
+            if (module.functions.items[i].imported) ordinal += 1;
+        }
+        // Find the ordinal-th function import
+        var fi: usize = 0;
         for (module.imports.items) |import| {
-            if (import.kind == .function and import.type_index == func.type_index) {
-                if (self.wasi) |*wasi| {
-                    if (wasi.debug) {
-                        oe.log("\nCalling imported function {s}::{s} with args: {any}\n", .{ import.module, import.name, args });
+            if (import.kind == .function) {
+                if (fi == ordinal) {
+                    if (self.wasi) |*wasi| {
+                        if (wasi.debug) {
+                            oe.log("\nCalling imported function {s}::{s} with args: {any}\n", .{ import.module, import.name, args });
+                        }
                     }
+                    return try self.handleImport(import.module, import.name, args);
                 }
-                return try self.handleImport(import.module, import.name, args);
+                fi += 1;
             }
         }
-        oe.log("Could not find import for function {d}", .{func_index});
+        oe.log("Could not map imported function index {d} to import ordinal {d}", .{ func_index, ordinal });
         return Error.UnknownImport;
     }
 
@@ -287,8 +374,9 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
     errdefer self.stack.shrinkRetainingCapacity(original_stack_size);
 
     // Create local variables environment
-    var locals_env = std.ArrayList(Value).init(self.allocator);
-    defer locals_env.deinit();
+    const total_locals = func_type.params.len + func.locals.len;
+    var locals_env = try std.ArrayList(Value).initCapacity(self.allocator, total_locals);
+    defer locals_env.deinit(self.allocator);
 
     // Initialize locals with arguments, converting types if necessary
     for (args, 0..) |arg, i| {
@@ -297,7 +385,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
         if (arg_type == param_type) {
             // Types match, use the argument as is
-            try locals_env.append(arg);
+            try locals_env.append(self.allocator, arg);
         } else {
             // Types don't match, try to convert
             oe.log("Type mismatch for argument {d}: expected {s}, got {s}", .{
@@ -350,33 +438,43 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
             };
 
             oe.log("Converted value: {any}", .{converted_value});
-            try locals_env.append(converted_value);
+            try locals_env.append(self.allocator, converted_value);
         }
     }
 
-    // Initialize remaining locals with default values
-    for (func.locals) |local_type| {
-        const default_val: Value = switch (local_type) {
-            .i32 => .{ .i32 = 0 },
-            .i64 => .{ .i64 = 0 },
-            .f32 => .{ .f32 = 0.0 },
-            .f64 => .{ .f64 = 0.0 },
-            .v128 => .{ .v128 = [_]u8{0} ** 16 },
-            .funcref => .{ .funcref = null },
-            .externref => .{ .externref = null },
-            .block => .{ .block = {} },
-        };
-        try locals_env.append(default_val);
+    // Initialize declared locals to zero values
+    if (func.locals.len > 0) {
+        for (func.locals) |lt| {
+            const zero: Value = switch (lt) {
+                .i32 => .{ .i32 = 0 },
+                .i64 => .{ .i64 = 0 },
+                .f32 => .{ .f32 = 0.0 },
+                .f64 => .{ .f64 = 0.0 },
+                .v128 => .{ .v128 = [_]u8{0} ** 16 },
+                .funcref => .{ .funcref = null },
+                .externref => .{ .externref = null },
+                .block => .{ .block = {} },
+            };
+            try locals_env.append(self.allocator, zero);
+        }
     }
 
-    // Initialize control flow stack for blocks and loops
-    var block_stack = std.ArrayList(Block).init(self.allocator);
-    defer block_stack.deinit();
+    // Initialize control flow stack for blocks and loops, pre-sized from summary if available
+    var block_stack = try std.ArrayList(Block).initCapacity(self.allocator, 0);
+    if (self.function_summary.get(func_index)) |s| {
+        try block_stack.ensureTotalCapacity(self.allocator, s.block_count + 4);
+    }
+    defer block_stack.deinit(self.allocator);
 
     // Execute function code
     var code_reader = Module.Reader.init(func.code);
     while (code_reader.pos < func.code.len) : ({}) {
         const opcode = try code_reader.readByte();
+        self.last_opcode = opcode;
+        self.last_pos = code_reader.pos - 1;
+        if (self.debug) {
+            std.debug.print("[wx] op 0x{X:0>2} at {d}, stack={d}\n", .{ opcode, self.last_pos, self.stack.items.len });
+        }
         oe.log("  Executing opcode 0x{X:0>2} at pos {d} (stack size: {d})", .{
             opcode, code_reader.pos - 1, self.stack.items.len,
         });
@@ -413,7 +511,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
         }
 
         const op_match = Op.match(opcode) orelse {
-            oe.log("  Unknown opcode 0x{X:0>2}", .{opcode});
+            std.debug.print("Unknown opcode 0x{X:0>2} at pos {d}\n", .{ opcode, code_reader.pos - 1 });
             return Error.InvalidOpcode;
         };
 
@@ -428,7 +526,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
                     // Track the try block on the block stack
                     const try_pos = code_reader.pos - 2; // Position of the try opcode
-                    try self.block_stack.append(.{
+                    try self.block_stack.append(self.allocator, .{
                         .type = .@"try",
                         .pos = try_pos,
                         .start_stack_size = self.stack.items.len,
@@ -582,11 +680,6 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     o.log("  Unhandled exception reference", .{});
                     return Error.InvalidAccess;
                 },
-                else => {
-                    var e = Log.err("unknown", "unknown");
-                    e.log("Unknown opcode: 0x{X:0>2}", .{opcode});
-                    return Error.InvalidOpcode;
-                },
             },
             .memory => |m| switch (m) {
                 .size => {
@@ -607,7 +700,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     });
 
                     // Push page count to stack
-                    try self.stack.append(.{ .i32 = @intCast(current_pages) });
+                    try self.stack.append(self.allocator, .{ .i32 = @intCast(current_pages) });
                 },
                 .grow => {
                     var o = Log.op("memory", "grow");
@@ -637,7 +730,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (pages.?.i32 < 0) {
                         print("Cannot grow memory by negative pages: {d}", .{pages.?.i32}, Color.red);
                         // Return -1 to indicate failure
-                        try self.stack.append(.{ .i32 = -1 });
+                        try self.stack.append(self.allocator, .{ .i32 = -1 });
                         return Error.MemoryGrowLimitReached;
                     }
 
@@ -650,7 +743,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                             current_pages, pages.?.i32, max_pages,
                         }, Color.red);
                         // Return -1 to indicate failure
-                        try self.stack.append(.{ .i32 = -1 });
+                        try self.stack.append(self.allocator, .{ .i32 = -1 });
                         return Error.MemoryGrowLimitReached;
                     }
 
@@ -675,79 +768,38 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     module.memory = new_memory;
 
                     // Return old page count
-                    try self.stack.append(.{ .i32 = @intCast(current_pages) });
+                    try self.stack.append(self.allocator, .{ .i32 = @intCast(current_pages) });
                 },
             },
             .f32 => |float32| switch (float32) {
+                .@"const" => {
+                    const bytes = try code_reader.readBytes(4);
+                    const bits = std.mem.readInt(u32, bytes[0..4], .little);
+                    const v: f32 = @bitCast(bits);
+                    try self.stack.append(self.allocator, .{ .f32 = v });
+                },
                 .store => {
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const offset = try code_reader.readLEB128();
-                    const alignment = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
                     const v = self.stack.pop();
                     const addr = self.stack.pop();
-                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32 or
-                        @as(ValueType, std.meta.activeTag(v.?)) != .f32)
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32 or @as(ValueType, std.meta.activeTag(v.?)) != .f32)
                         return Error.TypeMismatch;
-                    if (module.memory == null) return Error.InvalidAccess;
-                    var e = Log.err("f32", "store");
-
-                    // Check for negative address
-                    if (addr.?.i32 < 0) {
-                        e.log("Invalid memory access: negative address {d}", .{addr.?.i32});
-                        return Error.InvalidAccess;
-                    }
-
-                    const effective_addr = @as(usize, @intCast(addr.?.i32)) + offset;
-                    if (effective_addr + 4 > module.memory.?.len) return Error.InvalidAccess;
-                    _ = alignment; // TODO: Use alignment
+                    const ea = try effAddr(addr.?.i32, offset);
                     const bits: u32 = @bitCast(v.?.f32);
-                    std.mem.writeInt(u32, module.memory.?[effective_addr..][0..4], bits, .little);
-
-                    Log.op("f32", "store").log("wrote value {d} at addr {d}", .{ v.?.f32, effective_addr });
+                    try self.writeLittle(u32, ea, bits);
                 },
                 .load => {
-                    // Read memory alignment and offset
-                    const flags = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
                     const offset = try code_reader.readLEB128();
-
-                    var o = Log.op("f32", "load");
-                    var e = Log.err("f32", "load");
-                    o.log("align={d} offset={d}", .{ flags, offset });
-
-                    if (self.stack.items.len < 1) {
-                        e.log("Stack underflow: f32.load needs an address", .{});
-                        return Error.StackUnderflow;
-                    }
-
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const addr_val = self.stack.pop();
-                    const atag = std.meta.activeTag(addr_val.?);
-                    if (@as(ValueType, atag) != .i32) {
-                        e.log("Type mismatch: f32.load expects i32 address, got {s}", .{@tagName(atag)});
-                        return Error.TypeMismatch;
-                    }
-
-                    if (module.memory == null) {
-                        e.log("Memory not initialized", .{});
-                        return Error.InvalidAccess;
-                    }
-
-                    // Check for negative address
-                    if (addr_val.?.i32 < 0) {
-                        e.log("Invalid memory access: negative address {d}", .{addr_val.?.i32});
-                        return Error.InvalidAccess;
-                    }
-
-                    const effective_addr = @as(usize, @intCast(addr_val.?.i32)) + offset;
-                    if (effective_addr + 4 > module.memory.?.len) {
-                        e.log("Memory access out of bounds: {d} + 4 > {d}", .{ effective_addr, module.memory.?.len });
-                        return Error.InvalidAccess;
-                    }
-
-                    const bits = std.mem.readInt(u32, module.memory.?[effective_addr..][0..4], .little);
-                    const loaded_value = @as(f32, @bitCast(bits));
-                    try self.stack.append(.{ .f32 = loaded_value });
-
-                    o.log("  Loaded f32 value {} from address {d}", .{ loaded_value, effective_addr });
+                    if (@as(ValueType, std.meta.activeTag(addr_val.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr_val.?.i32, offset);
+                    const bits = try self.readLittle(u32, ea);
+                    const loaded_value: f32 = @bitCast(bits);
+                    try self.stack.append(self.allocator, .{ .f32 = loaded_value });
                 },
                 .convert_i32_u => {
                     var o = Log.op("f32", "convert_i32_u");
@@ -755,21 +807,334 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const val = self.stack.pop();
                     if (@as(ValueType, std.meta.activeTag(val.?)) != .i32) return Error.TypeMismatch;
-                    try self.stack.append(.{ .f32 = @as(f32, @floatFromInt(@as(u32, @bitCast(val.?.i32)))) });
+                    try self.stack.append(self.allocator, .{ .f32 = @as(f32, @floatFromInt(@as(u32, @bitCast(val.?.i32)))) });
                 },
-                .@"const" => {
-                    // Read 4 bytes as little-endian f32
-                    const float_bytes = try code_reader.readBytes(4);
-                    const float_value = @as(f32, @bitCast(std.mem.readInt(u32, float_bytes[0..4], .little)));
-                    var o = Log.op("f32", "const");
-                    o.log("{d}", .{float_value});
-                    try self.stack.append(.{ .f32 = float_value });
+                .convert_i32_s => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const val = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(val.?)) != .i32) return Error.TypeMismatch;
+                    try self.stack.append(self.allocator, .{ .f32 = @as(f32, @floatFromInt(val.?.i32)) });
+                    
+                    var o = Log.op("f32", "convert_i32_s");
+                    o.log("convert_i32_s({d}) = {d}", .{ val.?.i32, @as(f32, @floatFromInt(val.?.i32)) });
                 },
-                else => {
-                    var e = Log.err("unknown", "unknown");
-                    e.log("Unknown opcode: 0x{X:0>2}", .{opcode});
-                    return Error.InvalidOpcode;
+                .convert_i64_s => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const val = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(val.?)) != .i64) return Error.TypeMismatch;
+                    try self.stack.append(self.allocator, .{ .f32 = @as(f32, @floatFromInt(val.?.i64)) });
+                    
+                    var o = Log.op("f32", "convert_i64_s");
+                    o.log("convert_i64_s({d}) = {d}", .{ val.?.i64, @as(f32, @floatFromInt(val.?.i64)) });
                 },
+                .convert_i64_u => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const val = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(val.?)) != .i64) return Error.TypeMismatch;
+                    const uval = @as(u64, @bitCast(val.?.i64));
+                    try self.stack.append(self.allocator, .{ .f32 = @as(f32, @floatFromInt(uval)) });
+                    
+                    var o = Log.op("f32", "convert_i64_u");
+                    o.log("convert_i64_u({d}) = {d}", .{ uval, @as(f32, @floatFromInt(uval)) });
+                },
+                .demote_f64 => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const val = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(val.?)) != .f64) return Error.TypeMismatch;
+                    try self.stack.append(self.allocator, .{ .f32 = @as(f32, @floatCast(val.?.f64)) });
+                    
+                    var o = Log.op("f32", "demote_f64");
+                    o.log("demote_f64({d}) = {d}", .{ val.?.f64, @as(f32, @floatCast(val.?.f64)) });
+                },
+                // Comparison operations
+                .eq => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.f32 == b.?.f32) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("f32", "eq");
+                    o.log("{d} == {d} -> {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .ne => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.f32 != b.?.f32) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("f32", "ne");
+                    o.log("{d} != {d} -> {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .lt => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.f32 < b.?.f32) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("f32", "lt");
+                    o.log("{d} < {d} -> {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .gt => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.f32 > b.?.f32) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("f32", "gt");
+                    o.log("{d} > {d} -> {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .le => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.f32 <= b.?.f32) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("f32", "le");
+                    o.log("{d} <= {d} -> {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .ge => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.f32 >= b.?.f32) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("f32", "ge");
+                    o.log("{d} >= {d} -> {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                // Math operations
+                .abs => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = @abs(a.?.f32);
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "abs");
+                    o.log("abs({d}) = {d}", .{ a.?.f32, result });
+                },
+                .neg => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = -a.?.f32;
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "neg");
+                    o.log("neg({d}) = {d}", .{ a.?.f32, result });
+                },
+                .ceil => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = @ceil(a.?.f32);
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "ceil");
+                    o.log("ceil({d}) = {d}", .{ a.?.f32, result });
+                },
+                .floor => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = @floor(a.?.f32);
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "floor");
+                    o.log("floor({d}) = {d}", .{ a.?.f32, result });
+                },
+                .trunc => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = @trunc(a.?.f32);
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "trunc");
+                    o.log("trunc({d}) = {d}", .{ a.?.f32, result });
+                },
+                .nearest => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = @round(a.?.f32);
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "nearest");
+                    o.log("nearest({d}) = {d}", .{ a.?.f32, result });
+                },
+                .sqrt => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = @sqrt(a.?.f32);
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "sqrt");
+                    o.log("sqrt({d}) = {d}", .{ a.?.f32, result });
+                },
+                .add => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = a.?.f32 + b.?.f32;
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "add");
+                    o.log("{d} + {d} = {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .sub => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = a.?.f32 - b.?.f32;
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "sub");
+                    o.log("{d} - {d} = {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .mul => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = a.?.f32 * b.?.f32;
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "mul");
+                    o.log("{d} * {d} = {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .div => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = a.?.f32 / b.?.f32;
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "div");
+                    o.log("{d} / {d} = {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .min => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = @min(a.?.f32, b.?.f32);
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "min");
+                    o.log("min({d}, {d}) = {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .max => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = @max(a.?.f32, b.?.f32);
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "max");
+                    o.log("max({d}, {d}) = {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                .copysign => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    const result = std.math.copysign(a.?.f32, b.?.f32);
+                    try self.stack.append(self.allocator, .{ .f32 = result });
+                    
+                    var o = Log.op("f32", "copysign");
+                    o.log("copysign({d}, {d}) = {d}", .{ a.?.f32, b.?.f32, result });
+                },
+                // f32.const handled earlier in this switch
             },
             .control => |ctrl_op| switch (ctrl_op) {
                 .@"unreachable" => {}, // unreachable - TODO: implement
@@ -786,7 +1151,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         o.log("  Block result type: {s}", .{@tagName(result_type.?)});
                     }
 
-                    try block_stack.append(.{
+                    try block_stack.append(self.allocator, .{
                         .type = .block,
                         .pos = code_reader.pos,
                         .start_stack_size = self.stack.items.len,
@@ -807,7 +1172,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         o.log("  Loop result type: {s}", .{@tagName(result_type.?)});
                     }
 
-                    try block_stack.append(.{
+                    try block_stack.append(self.allocator, .{
                         .type = .loop,
                         .pos = code_reader.pos,
                         .start_stack_size = self.stack.items.len,
@@ -865,7 +1230,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
                     // Add block to stack
                     const block_idx = block_stack.items.len;
-                    try block_stack.append(.{
+                    try block_stack.append(self.allocator, .{
                         .type = .@"if",
                         .pos = if_pos,
                         .start_stack_size = self.stack.items.len,
@@ -878,151 +1243,45 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (condition.i32 == 0) {
                         // Condition is false, skip to else or end
                         o.log("  Condition is false, skipping to else or end", .{});
-
-                        // First, try to find matching else
-                        var found_else = false;
-                        var depth: usize = 1;
-                        var search_pos = code_reader.pos;
-
-                        o.log("  Starting search for else at position {d}", .{search_pos});
-
-                        while (search_pos < func.code.len) {
-                            const opcode = func.code[search_pos];
-                            search_pos += 1;
-
-                            if (opcode == 0x02 or opcode == 0x03 or opcode == 0x04) { // block, loop, if
-                                depth += 1;
-                                // Skip block type
-                                search_pos += 1;
-                            } else if (opcode == 0x05) { // else
-                                if (depth == 1) {
-                                    // Found matching else
-                                    found_else = true;
-                                    o.log("  Found matching else at position {d}", .{search_pos - 1});
-                                    // Set else position in block
-                                    block_stack.items[block_idx].else_pos = search_pos - 1;
-                                    code_reader.pos = search_pos;
-                                    break;
-                                }
-                            } else if (opcode == 0x0B) { // end
-                                depth -= 1;
-                                if (depth == 0) {
-                                    // Found matching end without an else
-                                    o.log("  Found matching end at position {d} (no else)", .{search_pos - 1});
-                                    // Set end position in block
-                                    block_stack.items[block_idx].end_pos = search_pos - 1;
-                                    code_reader.pos = search_pos;
-                                    break;
-                                }
+                        if (try self.findElseOrEnd(func, &code_reader, code_reader.pos)) |res| {
+                            if (res.else_pos) |ep| {
+                                // Jump to code just after else opcode
+                                block_stack.items[block_idx].else_pos = ep;
+                                code_reader.pos = ep + 1;
+                            } else {
+                                block_stack.items[block_idx].end_pos = res.end_pos;
+                                code_reader.pos = res.end_pos + 1;
                             }
-                        }
-
-                        if (!found_else and search_pos >= func.code.len) {
-                            // Reached end of function, use it as end position
-                            o.log("  Reached end of function, using it as end position", .{});
-                            block_stack.items[block_idx].end_pos = func.code.len;
+                        } else {
+                            // No else/end found; bail to end of function
                             code_reader.pos = func.code.len;
                         }
                     } else {
                         o.log("  Condition is true, executing if block", .{});
                         // Optionally pre-compute the end position for later use
-                        _ = try self.findMatchingEnd(func, code_reader, if_pos, .@"if");
+                        _ = try self.findMatchingEnd(func, &code_reader, if_pos, .@"if");
                     }
                 },
                 .@"else" => {
-                    var o_else = Log.op("else", "");
-                    o_else.log("Else instruction at pos {d}", .{code_reader.pos - 1});
-
-                    if (block_stack.items.len == 0) {
-                        o_else.log("Error: Else without matching if", .{});
-                        return Error.InvalidAccess;
-                    }
-
-                    const block = &block_stack.items[block_stack.items.len - 1];
-                    if (block.type != .@"if") {
-                        o_else.log("Error: Else without matching if, current block is {s}", .{@tagName(block.type)});
-                        return Error.InvalidAccess;
-                    }
-
-                    // If we reached else normally (not by skipping), we need to skip the else block
-                    if (block.else_pos == null) {
-                        var depth: usize = 1;
-
-                        o_else.log("  Skipping over else block until matching end", .{});
-                        o_else.log("  Starting search at pos {d}", .{code_reader.pos});
-
-                        // Dump the next 16 bytes for debugging
-                        if (code_reader.pos < func.code.len) {
-                            const end_pos = @min(code_reader.pos + 16, func.code.len);
-                            o_else.log("  Next bytes: ", .{});
-                            for (code_reader.pos..end_pos) |i| {
-                                o_else.log("0x{X:0>2} ", .{func.code[i]});
+                    // Else reached after executing true-branch: skip to matching end
+                    var tmp = Module.Reader.init(func.code);
+                    tmp.pos = code_reader.pos;
+                    var depth: usize = 1;
+                    while (depth > 0 and tmp.pos < func.code.len) {
+                        const op = try tmp.readByte();
+                        if (op == 0x02 or op == 0x03 or op == 0x04) {
+                            depth += 1;
+                            const bt = try tmp.readByte();
+                            if (bt != 0x40 and bt != 0x7F and bt != 0x7E and bt != 0x7D and bt != 0x7C) {
+                                _ = try tmp.readLEB128();
                             }
-                            o_else.log("\n", .{});
+                        } else if (op == 0x0B) {
+                            depth -= 1;
+                        } else {
+                            skipInstruction(&tmp) catch {};
                         }
-
-                        while (depth > 0 and code_reader.pos < func.code.len) {
-                            const op = func.code[code_reader.pos];
-                            code_reader.pos += 1;
-
-                            o_else.log("    Examining opcode 0x{X:0>2} at {d}, depth={d}", .{ op, code_reader.pos - 1, depth });
-
-                            if (op == 0x02 or op == 0x03 or op == 0x04) { // block, loop, if
-                                depth += 1;
-                                o_else.log("    Found nested block/loop/if, depth now {d}", .{depth});
-
-                                // Skip block type byte
-                                if (code_reader.pos < func.code.len) {
-                                    const block_type = func.code[code_reader.pos];
-                                    code_reader.pos += 1;
-                                    o_else.log("    Block type: 0x{X:0>2}", .{block_type});
-
-                                    // Handle type markers correctly
-                                    if (block_type != 0x40 and block_type != 0x7F and
-                                        block_type != 0x7E and block_type != 0x7D and
-                                        block_type != 0x7C)
-                                    {
-                                        // Extended block type - need to read LEB128
-                                        var leb_pos = code_reader.pos;
-                                        var leb_byte: u8 = 0;
-                                        // Skip the LEB128 bytes
-                                        while (leb_pos < func.code.len) {
-                                            leb_byte = func.code[leb_pos];
-                                            leb_pos += 1;
-                                            // If highest bit is not set, this is the last byte
-                                            if ((leb_byte & 0x80) == 0) break;
-                                        }
-                                        code_reader.pos = leb_pos;
-                                        o_else.log("    Extended block type, skipped to {d}", .{code_reader.pos});
-                                    }
-                                }
-                            } else if (op == 0x0b) { // end
-                                depth -= 1;
-                                o_else.log("    Found end, depth now {d}", .{depth});
-                                if (depth == 0) {
-                                    // Found matching end
-                                    block.end_pos = code_reader.pos;
-                                    o_else.log("    Found matching end at position {d}", .{code_reader.pos});
-                                    break;
-                                }
-                            }
-
-                            // Safety check
-                            if (code_reader.pos >= func.code.len) {
-                                o_else.log("  Search reached end of function without finding matching end", .{});
-                                break;
-                            }
-                        }
-
-                        if (depth > 0) {
-                            // If we couldn't find the end, just default to the end of the function
-                            o_else.log("  Could not find matching end, defaulting to end of function", .{});
-                            code_reader.pos = func.code.len;
-                            block.end_pos = code_reader.pos;
-                        }
-                    } else {
-                        o_else.log("  Found else instruction at position set by if-skipping: {d}", .{block.else_pos.?});
                     }
+                    code_reader.pos = tmp.pos;
                 },
                 .end => {
                     if (block_stack.items.len == 0) {
@@ -1085,13 +1344,13 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         o.log("  Stack underflow, adding {d} default values", .{to_push});
 
                         for (0..to_push) |_| {
-                            try self.stack.append(.{ .i32 = 0 });
+                            try self.stack.append(self.allocator, .{ .i32 = 0 });
                         }
                     }
 
                     // Add back the result value if there is one
                     if (result_value != null) {
-                        try self.stack.append(result_value.?);
+                        try self.stack.append(self.allocator, result_value.?);
                         o.log("  Restored result value to stack: {any}", .{result_value.?});
                     }
 
@@ -1144,7 +1403,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
                     // Push back result value if we had one
                     if (result_value != null) {
-                        try self.stack.append(result_value.?);
+                        try self.stack.append(self.allocator, result_value.?);
                         o.log("  Restored result value to stack", .{});
                     }
 
@@ -1263,7 +1522,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
                         // If the function returns a value, push it onto the stack
                         if (called_type.results.len > 0) {
-                            try self.stack.append(result);
+                            try self.stack.append(self.allocator, result);
                         }
                         code_reader.pos = end_pos + 1;
                         o.log("  br branching past end at {d}\n", .{end_pos + 1});
@@ -1334,7 +1593,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
                         // Push back result value if we had one
                         if (result_value != null) {
-                            try self.stack.append(result_value.?);
+                            try self.stack.append(self.allocator, result_value.?);
                             o_br_if.log("  Restored result value to stack", .{});
                         }
 
@@ -1471,7 +1730,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
                     // If we have a return value, push it back
                     if (return_value != null) {
-                        try self.stack.append(return_value.?);
+                        try self.stack.append(self.allocator, return_value.?);
                     }
 
                     // Set position to end of function
@@ -1505,10 +1764,16 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     o.log("  Dropped value: {any}", .{val});
                 },
                 .call => {
-                    const func_idx = try code_reader.readLEB128();
+                    const func_idx = code_reader.readLEB128() catch |err| {
+                        std.debug.print("[wx] failed to read call index at pos {d}: {s}\n", .{ code_reader.pos, @errorName(err) });
+                        return err;
+                    };
                     var o = Log.op("call", "");
                     var e = Log.err("call", "function");
                     o.log("{d}", .{func_idx});
+                    if (self.debug) {
+                        std.debug.print("[wx] call {d}\n", .{func_idx});
+                    }
 
                     if (func_idx >= module.functions.items.len) {
                         e.log("Invalid function index: {d}", .{func_idx});
@@ -1537,10 +1802,13 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
                     // Call the function
                     const result = try self.executeFunction(func_idx, call_args);
+                    if (self.debug) {
+                        std.debug.print("[wx] return from {d}\n", .{func_idx});
+                    }
 
                     // If the function returns a value, push it onto the stack
                     if (called_type.results.len > 0) {
-                        try self.stack.append(result);
+                        try self.stack.append(self.allocator, result);
                     }
                 },
                 .delegate => {
@@ -1548,12 +1816,28 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     o.log("", .{});
                 },
                 .select => {
-                    var o = Log.op("select", "");
-                    o.log("", .{});
+                    if (self.stack.items.len < 3) return Error.StackUnderflow;
+                    const cond = self.stack.pop().?;
+                    const b = self.stack.pop().?;
+                    const a = self.stack.pop().?;
+                    if (@as(ValueType, std.meta.activeTag(cond)) != .i32) return Error.TypeMismatch;
+                    // Types of a and b must match
+                    if (@intFromEnum(@as(ValueType, std.meta.activeTag(a))) != @intFromEnum(@as(ValueType, std.meta.activeTag(b))))
+                        return Error.TypeMismatch;
+                    const chosen = if (cond.i32 != 0) a else b;
+                    try self.stack.append(self.allocator, chosen);
                 },
                 .select_t => {
-                    var o = Log.op("select_t", "");
-                    o.log("", .{});
+                    // For MVP, treat same as select and ignore the immediate type vector.
+                    if (self.stack.items.len < 3) return Error.StackUnderflow;
+                    const cond = self.stack.pop().?;
+                    const b = self.stack.pop().?;
+                    const a = self.stack.pop().?;
+                    if (@as(ValueType, std.meta.activeTag(cond)) != .i32) return Error.TypeMismatch;
+                    if (@intFromEnum(@as(ValueType, std.meta.activeTag(a))) != @intFromEnum(@as(ValueType, std.meta.activeTag(b))))
+                        return Error.TypeMismatch;
+                    const chosen = if (cond.i32 != 0) a else b;
+                    try self.stack.append(self.allocator, chosen);
                 },
             },
             .local => |f| switch (f) {
@@ -1573,7 +1857,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.InvalidAccess;
                     }
 
-                    try self.stack.append(locals_env.items[local_idx]);
+                    try self.stack.append(self.allocator, locals_env.items[local_idx]);
                     o.log("  Got local {d}: {any}", .{ local_idx, locals_env.items[local_idx] });
                 },
                 .set => {
@@ -1635,7 +1919,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.InvalidAccess;
                     }
 
-                    try self.stack.append(module.globals.items[global_idx].value);
+                    try self.stack.append(self.allocator, module.globals.items[global_idx].value);
                     o.log("  Got global {d}: {any}", .{ global_idx, module.globals.items[global_idx].value });
                 },
                 .set => {
@@ -1718,7 +2002,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     }
 
                     const v = module.table.?.items[@intCast(index.?.i32)];
-                    try self.stack.append(v);
+                    try self.stack.append(self.allocator, v);
 
                     o.log("  Got table[{d}]: {s}", .{ index.?.i32, @tagName(@as(ValueType, std.meta.activeTag(v))) });
                 },
@@ -1871,7 +2155,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
                             if (delta.?.i32 < 0) {
                                 print("  Cannot grow table by negative count: {d}", .{delta.?.i32}, Color.red);
-                                try self.stack.append(.{ .i32 = -1 }); // Return -1 on failure
+                                try self.stack.append(self.allocator, .{ .i32 = -1 }); // Return -1 on failure
                                 return Error.StackUnderflow;
                             }
 
@@ -1879,7 +2163,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                             const new_size = old_size + @as(usize, @intCast(delta.?.i32));
 
                             // Resize table
-                            try module.table.?.resize(new_size);
+                            try module.table.?.resize(self.allocator, new_size);
 
                             // Initialize new elements
                             for (old_size..new_size) |i| {
@@ -1887,7 +2171,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                             }
 
                             // Return previous size
-                            try self.stack.append(.{ .i32 = @intCast(old_size) });
+                            try self.stack.append(self.allocator, .{ .i32 = @intCast(old_size) });
 
                             o.log("  Table grown from {d} to {d} elements", .{ old_size, new_size });
                         },
@@ -1900,7 +2184,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                                 return Error.InvalidAccess;
                             }
 
-                            try self.stack.append(.{ .i32 = @intCast(module.table.?.items.len) });
+                            try self.stack.append(self.allocator, .{ .i32 = @intCast(module.table.?.items.len) });
 
                             o.log("  Table size: {d}", .{module.table.?.items.len});
                         },
@@ -1960,7 +2244,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                                 return Error.InvalidAccess;
                             }
 
-                            try self.stack.append(module.table.?.items[idx]);
+                            try self.stack.append(self.allocator, module.table.?.items[idx]);
                             o.log("  Table[{d}] = {s}", .{ idx, @tagName(@as(ValueType, std.meta.activeTag(module.table.?.items[idx]))) });
                         },
                         0x07 => { // table.set
@@ -2010,7 +2294,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
                             if (delta.?.i32 < 0) {
                                 print("  Cannot grow table by negative count: {d}", .{delta.?.i32}, Color.red);
-                                try self.stack.append(.{ .i32 = -1 }); // Return -1 on failure
+                                try self.stack.append(self.allocator, .{ .i32 = -1 }); // Return -1 on failure
                                 return Error.StackUnderflow;
                             }
 
@@ -2018,7 +2302,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                             const new_size = old_size + @as(usize, @intCast(delta.?.i32));
 
                             // Resize table
-                            try module.table.?.resize(new_size);
+                            try module.table.?.resize(self.allocator, new_size);
 
                             // Initialize new elements
                             for (old_size..new_size) |i| {
@@ -2026,7 +2310,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                             }
 
                             // Return previous size
-                            try self.stack.append(.{ .i32 = @intCast(old_size) });
+                            try self.stack.append(self.allocator, .{ .i32 = @intCast(old_size) });
 
                             o.log("  Table grown from {d} to {d} elements", .{ old_size, new_size });
                         },
@@ -2040,7 +2324,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                             }
 
                             const size = module.table.?.items.len;
-                            try self.stack.append(.{ .i32 = @intCast(size) });
+                            try self.stack.append(self.allocator, .{ .i32 = @intCast(size) });
 
                             o.log("  Table size: {d}", .{size});
                         },
@@ -2100,7 +2384,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                                 return Error.InvalidAccess;
                             }
 
-                            try self.stack.append(module.table.?.items[idx]);
+                            try self.stack.append(self.allocator, module.table.?.items[idx]);
                             o.log("  Table[{d}] = {s}", .{ idx, @tagName(@as(ValueType, std.meta.activeTag(module.table.?.items[idx]))) });
                         },
                         0x0c => { // table.set
@@ -2304,36 +2588,15 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
             .i32 => |int32| switch (int32) {
                 .load8_u => {
                     const offset = try code_reader.readLEB128();
-                    const alignment = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const addr = self.stack.pop();
-                    const atag = std.meta.activeTag(addr.?);
-                    if (@as(ValueType, atag) != .i32)
-                        return Error.TypeMismatch;
-                    if (module.memory == null) return Error.InvalidAccess;
-
-                    const effective_addr = @as(usize, @intCast(addr.?.i32)) + offset;
-                    if (effective_addr + 1 > module.memory.?.len) return Error.InvalidAccess;
-                    const loaded_value = std.mem.readInt(u8, module.memory.?[effective_addr..][0..1], .little);
-                    try self.stack.append(.{ .i32 = @as(i32, loaded_value) });
-                    var o = Log.op("i32", "load8_u");
-                    o.log("align={d} offset={d}", .{ alignment, offset });
-                    o.log("  Loaded i32 value {d} from address {d}", .{ @as(i32, loaded_value), addr.?.i32 });
-                    o.log("  Next opcode will be at position {d}", .{code_reader.pos});
-                    o.log("  Stack size after load: {d}", .{self.stack.items.len});
-
-                    // Debug: show next few bytes
-                    if (code_reader.pos < func.code.len) {
-                        const remaining = @min(func.code.len - code_reader.pos, 4);
-                        o.log("{s}  Next bytes: ", .{Color.cyan});
-                        for (func.code[code_reader.pos .. code_reader.pos + remaining]) |byte| {
-                            o.log("0x{X:0>2} ", .{byte});
-                        }
-                        o.log("{s}\n", .{Color.reset});
-                    }
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    const b = try self.readLittle(u8, ea);
+                    try self.stack.append(self.allocator, .{ .i32 = @intCast(b) });
                 },
                 .store => {
-                    var e = Log.err("i32", "store");
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const flags = try code_reader.readLEB128();
                     const offset = try code_reader.readLEB128();
@@ -2342,61 +2605,20 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (@as(ValueType, std.meta.activeTag(v.?)) != .i32 or
                         @as(ValueType, std.meta.activeTag(addr.?)) != .i32)
                         return Error.TypeMismatch;
-                    if (module.memory == null) return Error.InvalidAccess;
-
-                    // Check for negative address
-                    if (addr.?.i32 < 0) {
-                        e.log("Invalid memory access: negative address {d}", .{addr.?.i32});
-                        return Error.InvalidAccess;
-                    }
-
-                    // Calculate effective address with alignment
-                    const alignment = @as(u32, 1) << @truncate(@as(u5, @intCast(flags)));
-                    const effective_addr = @as(usize, @intCast(addr.?.i32)) + @as(usize, @intCast(offset));
-
-                    if (effective_addr + 4 > module.memory.?.len) return Error.InvalidAccess;
-                    std.mem.writeInt(i32, module.memory.?[effective_addr..][0..4], v.?.i32, .little);
-
-                    var o = Log.op("i32", "store");
-                    o.log("align={d} offset={d}", .{ alignment, offset });
-                    o.log("  Wrote i32 value {d} to address {d}", .{ v.?.i32, effective_addr });
-                    o.log("  Next opcode will be at position {d}", .{code_reader.pos});
-                    o.log("  Stack size after store: {d}", .{self.stack.items.len});
-
-                    // Debug: show next few bytes
-                    if (code_reader.pos < func.code.len) {
-                        const remaining = @min(func.code.len - code_reader.pos, 4);
-                        o.log("{s}  Next bytes: ", .{Color.cyan});
-                        for (func.code[code_reader.pos .. code_reader.pos + remaining]) |byte| {
-                            o.log("0x{X:0>2} ", .{byte});
-                        }
-                        o.log("{s}\n", .{Color.reset});
-                    }
+                    _ = flags; // alignment ignored
+                    const ea = try effAddr(addr.?.i32, offset);
+                    try self.writeLittle(i32, ea, v.?.i32);
                 },
                 .store8 => {
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const offset = try code_reader.readLEB128();
-                    const alignment = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
                     const v = self.stack.pop();
                     const addr = self.stack.pop();
-                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32 or
-                        @as(ValueType, std.meta.activeTag(v.?)) != .i32)
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32 or @as(ValueType, std.meta.activeTag(v.?)) != .i32)
                         return Error.TypeMismatch;
-                    if (module.memory == null) return Error.InvalidAccess;
-                    var e = Log.err("i32", "store8");
-
-                    // Check for negative address
-                    if (addr.?.i32 < 0) {
-                        e.log("Invalid memory access: negative address {d}", .{addr.?.i32});
-                        return Error.InvalidAccess;
-                    }
-
-                    const effective_addr = @as(usize, @intCast(addr.?.i32)) + offset;
-                    if (effective_addr + 1 > module.memory.?.len) return Error.InvalidAccess;
-                    _ = alignment; // TODO: Use alignment
-                    std.mem.writeInt(u8, module.memory.?[effective_addr..][0..1], @as(u8, @intCast(v.?.i32)), .little);
-
-                    Log.op("i32", "store8").log("wrote value {d} at addr {d}", .{ v.?.i32, effective_addr });
+                    const ea = try effAddr(addr.?.i32, offset);
+                    try self.writeLittle(u8, ea, @as(u8, @intCast(v.?.i32)));
                 },
                 // Numeric operations - i32 arithmetic
                 .add => {
@@ -2421,55 +2643,21 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
 
                     const result = v1.i32 +% v2.i32; // Wrapping addition
                     op.log("{d} + {d} = {d}", .{ v1.i32, v2.i32, result });
-                    try self.stack.append(Value{ .i32 = result });
+                    try self.stack.append(self.allocator, Value{ .i32 = result });
                 },
                 .sub => {
-                    var op = Log.op("i32", "sub");
-
-                    if (self.stack.items.len < 2) {
-                        var e = Log.err("i32", "sub");
-                        e.log("Stack underflow: Need 2 values for i32.sub, stack has {d}", .{self.stack.items.len});
-                        return Error.StackUnderflow;
-                    }
-
-                    const v2_opt = self.stack.pop();
-                    const v1_opt = self.stack.pop();
-                    const v2 = v2_opt.?; // Safe to unwrap since we checked stack size
-                    const v1 = v1_opt.?; // Safe to unwrap since we checked stack size
-
-                    if (@as(ValueType, std.meta.activeTag(v1)) != .i32 or @as(ValueType, std.meta.activeTag(v2)) != .i32) {
-                        var e = Log.err("i32.sub", "Type mismatch");
-                        e.log("Expected i32, got {s} and {s}", .{ @tagName(std.meta.activeTag(v1)), @tagName(std.meta.activeTag(v2)) });
-                        return Error.TypeMismatch;
-                    }
-
-                    const result = v1.i32 -% v2.i32; // Wrapping subtraction
-                    op.log("{d} - {d} = {d}", .{ v1.i32, v2.i32, result });
-                    try self.stack.append(Value{ .i32 = result });
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const vb = self.stack.pop().?;
+                    const va = self.stack.pop().?;
+                    const result = asI32(va) -% asI32(vb);
+                    try self.stack.append(self.allocator, .{ .i32 = result });
                 },
                 .mul => {
-                    var op = Log.op("i32", "mul");
-
-                    if (self.stack.items.len < 2) {
-                        var e = Log.err("i32", "mul");
-                        e.log("Stack underflow: Need 2 values for i32.mul, stack has {d}", .{self.stack.items.len});
-                        return Error.StackUnderflow;
-                    }
-
-                    const v2_opt = self.stack.pop();
-                    const v1_opt = self.stack.pop();
-                    const v2 = v2_opt.?; // Safe to unwrap since we checked stack size
-                    const v1 = v1_opt.?; // Safe to unwrap since we checked stack size
-
-                    if (@as(ValueType, std.meta.activeTag(v1)) != .i32 or @as(ValueType, std.meta.activeTag(v2)) != .i32) {
-                        var e = Log.err("i32.mul", "Type mismatch");
-                        e.log("Expected i32, got {s} and {s}", .{ @tagName(std.meta.activeTag(v1)), @tagName(std.meta.activeTag(v2)) });
-                        return Error.TypeMismatch;
-                    }
-
-                    const result = v1.i32 *% v2.i32; // Wrapping multiplication
-                    op.log("{d} * {d} = {d}", .{ v1.i32, v2.i32, result });
-                    try self.stack.append(Value{ .i32 = result });
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const vb = self.stack.pop().?;
+                    const va = self.stack.pop().?;
+                    const result = asI32(va) *% asI32(vb);
+                    try self.stack.append(self.allocator, .{ .i32 = result });
                 },
                 .div_s => {
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
@@ -2489,7 +2677,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     }
 
                     const result = @divTrunc(a.?.i32, b.?.i32);
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     Log.op("i32", "div_s").log("{d} / {d} = {d}", .{ a.?.i32, b.?.i32, result });
                 },
@@ -2507,7 +2695,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const ua = @as(u32, @bitCast(a.?.i32));
                     const ub = @as(u32, @bitCast(b.?.i32));
                     const result = @as(i32, @bitCast(@divFloor(ua, ub)));
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "div_u");
                     o.log("{d} (unsigned) / {d} (unsigned) = {d}", .{ ua, ub, result });
@@ -2524,7 +2712,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (b.?.i32 == 0) return Error.DivideByZero;
 
                     const result = @rem(a.?.i32, b.?.i32);
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     Log.op("i32", "rem_s").log("{d} % {d} = {d}", .{ a.?.i32, b.?.i32, result });
                 },
@@ -2542,7 +2730,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const ua = @as(u32, @bitCast(a.?.i32));
                     const ub = @as(u32, @bitCast(b.?.i32));
                     const result = @as(i32, @bitCast(@mod(ua, ub)));
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "rem_u");
                     o.log("{d} (unsigned) % {d} (unsigned) = {d}", .{ ua, ub, result });
@@ -2558,7 +2746,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.TypeMismatch;
 
                     const result = a.?.i32 & b.?.i32;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "and");
                     o.log("{d} & {d} = {d}", .{ a.?.i32, b.?.i32, result });
@@ -2573,7 +2761,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.TypeMismatch;
 
                     const result = a.?.i32 | b.?.i32;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "or");
                     o.log("{d} | {d} = {d}", .{ a.?.i32, b.?.i32, result });
@@ -2588,7 +2776,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.TypeMismatch;
 
                     const result = a.?.i32 ^ b.?.i32;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "xor");
                     o.log("{d} ^ {d} = {d}", .{ a.?.i32, b.?.i32, result });
@@ -2605,7 +2793,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     // In WebAssembly, shift amount is masked to ensure it's in valid range
                     const shift = @as(u5, @intCast(b.?.i32 & 0x1F)); // mask to 5 bits (0-31)
                     const result = a.?.i32 << shift;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "shl");
                     o.log("i32.shl: {d} << {d} = {d}", .{ a.?.i32, shift, result });
@@ -2622,7 +2810,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     // In WebAssembly, shift amount is masked to ensure it's in valid range
                     const shift = @as(u5, @intCast(b.?.i32 & 0x1F)); // mask to 5 bits (0-31)
                     const result = a.?.i32 >> shift;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "shr_s");
                     o.log("i32.shr_s: {d} >> {d} = {d}", .{ a.?.i32, shift, result });
@@ -2640,7 +2828,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const shift = @as(u5, @intCast(b.?.i32 & 0x1F)); // mask to 5 bits (0-31)
                     const ua = @as(u32, @bitCast(a.?.i32));
                     const result = @as(i32, @bitCast(ua >> shift));
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "shr_u");
                     o.log("{d} (unsigned) >> {d} = {d}", .{ ua, shift, result });
@@ -2658,7 +2846,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const rotate = @as(u5, @intCast(b.?.i32 & 0x1F)); // mask to 5 bits (0-31)
                     const ua = @as(u32, @bitCast(a.?.i32));
                     const result = @as(i32, @bitCast(std.math.rotl(u32, ua, rotate)));
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "rotl");
                     o.log("rotl({d}, {d}) = {d}", .{ ua, rotate, result });
@@ -2676,7 +2864,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const rotate = @as(u5, @intCast(b.?.i32 & 0x1F)); // mask to 5 bits (0-31)
                     const ua = @as(u32, @bitCast(a.?.i32));
                     const result = @as(i32, @bitCast(std.math.rotr(u32, ua, rotate)));
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "rotr");
                     o.log("rotl({d}, {d}) = {d}", .{ ua, rotate, result });
@@ -2690,7 +2878,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.TypeMismatch;
 
                     const result: i32 = if (a.?.i32 == 0) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "eqz");
                     o.log("{d} == 0 -> {d}", .{ a.?.i32, result });
@@ -2705,7 +2893,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.TypeMismatch;
 
                     const result: i32 = if (a.?.i32 == b.?.i32) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "eq");
                     o.log("{d} == {d} -> {d}", .{ a.?.i32, b.?.i32, result });
@@ -2720,7 +2908,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.TypeMismatch;
 
                     const result: i32 = if (a.?.i32 != b.?.i32) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "ne");
                     o.log("{d} != {d} -> {d}", .{ a.?.i32, b.?.i32, result });
@@ -2735,7 +2923,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.TypeMismatch;
 
                     const result: i32 = if (a.?.i32 < b.?.i32) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "lt_s");
                     o.log("{d} < {d} -> {d}", .{ a.?.i32, b.?.i32, result });
@@ -2752,7 +2940,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const ua = @as(u32, @bitCast(a.?.i32));
                     const ub = @as(u32, @bitCast(b.?.i32));
                     const result: i32 = if (ua < ub) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "lt_u");
                     o.log("{d} (unsigned) < {d} (unsigned) -> {d}", .{ ua, ub, result });
@@ -2767,7 +2955,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.TypeMismatch;
 
                     const result: i32 = if (a.?.i32 > b.?.i32) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "gt_s");
                     o.log("{d} > {d} -> {d}", .{ a.?.i32, b.?.i32, result });
@@ -2784,7 +2972,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const ua = @as(u32, @bitCast(a.?.i32));
                     const ub = @as(u32, @bitCast(b.?.i32));
                     const result: i32 = if (ua > ub) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "gt_u");
                     o.log("{d} (unsigned) > {d} (unsigned) -> {d}", .{ ua, ub, result });
@@ -2799,7 +2987,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.TypeMismatch;
 
                     const result: i32 = if (a.?.i32 <= b.?.i32) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "le_s");
                     o.log("{d} <= {d} -> {d}", .{ a.?.i32, b.?.i32, result });
@@ -2816,7 +3004,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const ua = @as(u32, @bitCast(a.?.i32));
                     const ub = @as(u32, @bitCast(b.?.i32));
                     const result: i32 = if (ua <= ub) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
                     var o = Log.op("i32", "le_u");
                     o.log("{d} (unsigned) <= {d} (unsigned) -> {d}", .{ ua, ub, result });
                 },
@@ -2830,7 +3018,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         return Error.TypeMismatch;
 
                     const result: i32 = if (a.?.i32 >= b.?.i32) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "ge_s");
                     o.log("{d} >= {d} -> {d}", .{ a.?.i32, b.?.i32, result });
@@ -2847,147 +3035,770 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const ua = @as(u32, @bitCast(a.?.i32));
                     const ub = @as(u32, @bitCast(b.?.i32));
                     const result: i32 = if (ua >= ub) 1 else 0;
-                    try self.stack.append(.{ .i32 = result });
+                    try self.stack.append(self.allocator, .{ .i32 = result });
 
                     var o = Log.op("i32", "ge_u");
                     o.log("{d} (unsigned) >= {d} (unsigned) -> {d}", .{ ua, ub, result });
                 },
-                .load => {
-                    var o = Log.op("i32", "load");
-                    var e = Log.err("i32", "load");
-
-                    const flags = try code_reader.readLEB128();
-                    const offset = try code_reader.readLEB128();
-
-                    if (self.stack.items.len < 1) {
-                        e.log("Stack underflow: Need address for i32.load, stack is empty", .{});
-                        return Error.StackUnderflow;
-                    }
-
-                    const addr_opt = self.stack.pop();
-                    const addr = addr_opt.?; // Safe to unwrap since we checked stack size
-
-                    if (@as(ValueType, std.meta.activeTag(addr)) != .i32) {
-                        e.log("Type mismatch: Expected i32 for address, got {s}", .{@tagName(std.meta.activeTag(addr))});
+                // Bitwise count operations
+                .clz => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i32)
                         return Error.TypeMismatch;
-                    }
-
-                    if (module.memory == null) {
-                        e.log("Invalid memory access: No memory defined in module", .{});
+                    
+                    const val = @as(u32, @bitCast(a.?.i32));
+                    const result: i32 = @intCast(@clz(val));
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i32", "clz");
+                    o.log("clz({d}) = {d}", .{ val, result });
+                },
+                .ctz => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i32)
+                        return Error.TypeMismatch;
+                    
+                    const val = @as(u32, @bitCast(a.?.i32));
+                    const result: i32 = @intCast(@ctz(val));
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i32", "ctz");
+                    o.log("ctz({d}) = {d}", .{ val, result });
+                },
+                .popcnt => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i32)
+                        return Error.TypeMismatch;
+                    
+                    const val = @as(u32, @bitCast(a.?.i32));
+                    const result: i32 = @intCast(@popCount(val));
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i32", "popcnt");
+                    o.log("popcnt({d}) = {d}", .{ val, result });
+                },
+                // Memory load operations
+                .load8_s => {
+                    const offset = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const addr = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    const loaded_value = try self.readLittle(i8, ea);
+                    try self.stack.append(self.allocator, .{ .i32 = loaded_value });
+                },
+                .load16_s => {
+                    const offset = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const addr = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    const loaded_value = try self.readLittle(i16, ea);
+                    try self.stack.append(self.allocator, .{ .i32 = loaded_value });
+                },
+                .load16_u => {
+                    const offset = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const addr = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    const loaded_value = try self.readLittle(u16, ea);
+                    try self.stack.append(self.allocator, .{ .i32 = @intCast(loaded_value) });
+                },
+                .store16 => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const offset = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
+                    const v = self.stack.pop();
+                    const addr = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32 or @as(ValueType, std.meta.activeTag(v.?)) != .i32)
+                        return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    try self.writeLittle(u16, ea, @as(u16, @truncate(@as(u32, @bitCast(v.?.i32)))));
+                },
+                // Type conversion operations  
+                .wrap_i64 => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = @truncate(a.?.i64);
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i32", "wrap_i64");
+                    o.log("wrap_i64({d}) = {d}", .{ a.?.i64, result });
+                },
+                .trunc_f32_s => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    // Check for NaN and infinity
+                    if (std.math.isNan(a.?.f32) or std.math.isInf(a.?.f32)) {
                         return Error.InvalidAccess;
                     }
-
-                    // Calculate effective address with alignment
-                    const alignment = @as(u32, 1) << @truncate(@as(u5, @intCast(flags)));
-                    const effective_addr = @as(usize, @intCast(addr.i32)) + @as(usize, @intCast(offset));
-
-                    if (effective_addr + 4 > module.memory.?.len) {
-                        e.log("Memory access out of bounds: Address {d} is beyond memory size {d}", .{ effective_addr, module.memory.?.len });
+                    
+                    // Check for values outside i32 range
+                    if (a.?.f32 >= @as(f32, @floatFromInt(std.math.maxInt(i32))) + 1 or 
+                        a.?.f32 < @as(f32, @floatFromInt(std.math.minInt(i32)))) {
                         return Error.InvalidAccess;
                     }
-
-                    // TODO: Use alignment check
-                    const val = std.mem.readInt(i32, module.memory.?[effective_addr..][0..4], .little);
-                    try self.stack.append(.{ .i32 = val });
-
-                    o.log("align={d} offset={d}", .{ alignment, offset });
-                    o.log("  Loaded i32 value {d} from address {d}", .{ val, effective_addr });
-                    o.log("  Next opcode will be at position {d}", .{code_reader.pos});
-                    o.log("  Stack size after load: {d}", .{self.stack.items.len});
-                    o.log("  Next bytes: ", .{});
-                    var i: usize = 0;
-                    while (i < 5 and code_reader.pos + i < func.code.len) : (i += 1) {
-                        o.log("0x{X:0>2} ", .{func.code[code_reader.pos + i]});
+                    
+                    const result: i32 = @intFromFloat(a.?.f32);
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i32", "trunc_f32_s");
+                    o.log("trunc_f32_s({d}) = {d}", .{ a.?.f32, result });
+                },
+                .trunc_f32_u => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
+                        return Error.TypeMismatch;
+                    
+                    // Check for NaN and infinity
+                    if (std.math.isNan(a.?.f32) or std.math.isInf(a.?.f32)) {
+                        return Error.InvalidAccess;
                     }
-                    o.log("\n", .{});
+                    
+                    // Check for negative values or values outside u32 range
+                    if (a.?.f32 < 0 or a.?.f32 >= @as(f32, @floatFromInt(std.math.maxInt(u32))) + 1) {
+                        return Error.InvalidAccess;
+                    }
+                    
+                    const result: u32 = @intFromFloat(a.?.f32);
+                    try self.stack.append(self.allocator, .{ .i32 = @bitCast(result) });
+                    
+                    var o = Log.op("i32", "trunc_f32_u");
+                    o.log("trunc_f32_u({d}) = {d}", .{ a.?.f32, result });
+                },
+                .trunc_f64_s => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f64)
+                        return Error.TypeMismatch;
+                    
+                    // Check for NaN and infinity
+                    if (std.math.isNan(a.?.f64) or std.math.isInf(a.?.f64)) {
+                        return Error.InvalidAccess;
+                    }
+                    
+                    // Check for values outside i32 range
+                    if (a.?.f64 >= @as(f64, @floatFromInt(std.math.maxInt(i32))) + 1 or 
+                        a.?.f64 < @as(f64, @floatFromInt(std.math.minInt(i32)))) {
+                        return Error.InvalidAccess;
+                    }
+                    
+                    const result: i32 = @intFromFloat(a.?.f64);
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i32", "trunc_f64_s");
+                    o.log("trunc_f64_s({d}) = {d}", .{ a.?.f64, result });
+                },
+                .trunc_f64_u => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .f64)
+                        return Error.TypeMismatch;
+                    
+                    // Check for NaN and infinity
+                    if (std.math.isNan(a.?.f64) or std.math.isInf(a.?.f64)) {
+                        return Error.InvalidAccess;
+                    }
+                    
+                    // Check for negative values or values outside u32 range
+                    if (a.?.f64 < 0 or a.?.f64 >= @as(f64, @floatFromInt(std.math.maxInt(u32))) + 1) {
+                        return Error.InvalidAccess;
+                    }
+                    
+                    const result: u32 = @intFromFloat(a.?.f64);
+                    try self.stack.append(self.allocator, .{ .i32 = @bitCast(result) });
+                    
+                    var o = Log.op("i32", "trunc_f64_u");
+                    o.log("trunc_f64_u({d}) = {d}", .{ a.?.f64, result });
+                },
+                .load => {
+    _ = try code_reader.readLEB128(); // flags (alignment), currently unused
+                    const offset = try code_reader.readLEB128();
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const addr_val = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr_val.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr_val.?.i32, offset);
+                    const val = try self.readLittle(i32, ea);
+                    try self.stack.append(self.allocator, .{ .i32 = val });
                 },
                 .@"const" => {
-                    const v = try code_reader.readLEB128();
-                    var o = Log.op("i32", "const");
-                    o.log("{d}", .{v});
-                    try self.stack.append(.{ .i32 = @intCast(v) });
-                },
-                else => {
-                    var e = Log.err("unknown", "unknown");
-                    e.log("Unknown opcode: 0x{X:0>2}", .{opcode});
-                    return Error.InvalidOpcode;
+                    const v = try code_reader.readSLEB32();
+                    try self.stack.append(self.allocator, .{ .i32 = v });
                 },
             },
             .i64 => |int64| switch (int64) {
+                .load8_s => {
+                    const offset = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const addr = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    const b = try self.readLittle(i8, ea);
+                    try self.stack.append(self.allocator, .{ .i64 = @as(i64, b) });
+                },
+                .load8_u => {
+                    const offset = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const addr = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    const b = try self.readLittle(u8, ea);
+                    try self.stack.append(self.allocator, .{ .i64 = @as(i64, b) });
+                },
+                .load16_s => {
+                    const offset = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const addr = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    const v = try self.readLittle(i16, ea);
+                    try self.stack.append(self.allocator, .{ .i64 = @as(i64, v) });
+                },
+                .load16_u => {
+                    const offset = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const addr = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    const v = try self.readLittle(u16, ea);
+                    try self.stack.append(self.allocator, .{ .i64 = @as(i64, v) });
+                },
+                .load32_s => {
+                    const offset = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const addr = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    const v = try self.readLittle(i32, ea);
+                    try self.stack.append(self.allocator, .{ .i64 = @as(i64, v) });
+                },
+                .load32_u => {
+                    const offset = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const addr = self.stack.pop();
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr.?.i32, offset);
+                    const v = try self.readLittle(u32, ea);
+                    try self.stack.append(self.allocator, .{ .i64 = @as(i64, v) });
+                },
                 .store => {
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const offset = try code_reader.readLEB128();
-                    const alignment = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
                     const v = self.stack.pop();
                     const addr = self.stack.pop();
-                    var e = Log.err("i64", "store");
-                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32 or
-                        @as(ValueType, std.meta.activeTag(v.?)) != .i64)
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32 or @as(ValueType, std.meta.activeTag(v.?)) != .i64)
                         return Error.TypeMismatch;
-                    if (module.memory == null) return Error.InvalidAccess;
-
-                    // Check for negative address
-                    if (addr.?.i32 < 0) {
-                        e.log("Invalid memory access: negative address {d}", .{addr.?.i32});
-                        return Error.InvalidAccess;
-                    }
-
-                    const effective_addr = @as(usize, @intCast(addr.?.i32)) + offset;
-                    if (effective_addr + 8 > module.memory.?.len) return Error.InvalidAccess;
-                    _ = alignment; // TODO: Use alignment
-                    std.mem.writeInt(i64, module.memory.?[effective_addr..][0..8], v.?.i64, .little);
-
-                    var o = Log.op("i64", "store");
-                    o.log("wrote value {d} at addr {d}", .{ v.?.i64, effective_addr });
+                    const ea = try effAddr(addr.?.i32, offset);
+                    try self.writeLittle(i64, ea, v.?.i64);
                 },
                 .load => {
-                    // Read memory alignment and offset
-                    const flags = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128(); // flags
                     const offset = try code_reader.readLEB128();
-
-                    var o = Log.op("i64", "load");
-                    var e = Log.err("i64", "load");
-                    o.log("align={d} offset={d}", .{ flags, offset });
-
-                    if (self.stack.items.len < 1) {
-                        e.log("Stack underflow: i64.load needs an address", .{});
-                        return Error.StackUnderflow;
-                    }
-
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const addr_val = self.stack.pop();
-                    const atag = std.meta.activeTag(addr_val.?);
-                    if (@as(ValueType, atag) != .i32) {
-                        e.log("i64.load expects i32 address, got {s}", .{@tagName(std.meta.activeTag(addr_val.?))});
-                        return Error.TypeMismatch;
-                    }
-
-                    if (module.memory == null) {
-                        e.log("Memory not initialized", .{});
-                        return Error.InvalidAccess;
-                    }
-
-                    // Check for negative address
-                    if (addr_val.?.i32 < 0) {
-                        e.log("Invalid memory access: negative address {d}", .{addr_val.?.i32});
-                        return Error.InvalidAccess;
-                    }
-
-                    const effective_addr = @as(usize, @intCast(addr_val.?.i32)) + offset;
-                    if (effective_addr + 8 > module.memory.?.len) {
-                        e.log("Memory access out of bounds: {d} + 8 > {d}", .{ effective_addr, module.memory.?.len });
-                        return Error.InvalidAccess;
-                    }
-
-                    const loaded_value = std.mem.readInt(i64, module.memory.?[effective_addr..][0..8], .little);
-                    try self.stack.append(.{ .i64 = loaded_value });
-
-                    o.log("  Loaded i64 value {d} from address {d}", .{ loaded_value, effective_addr });
+                    if (@as(ValueType, std.meta.activeTag(addr_val.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr_val.?.i32, offset);
+                    const loaded_value = try self.readLittle(i64, ea);
+                    try self.stack.append(self.allocator, .{ .i64 = loaded_value });
                 },
                 .@"const" => {
-                    const v = try code_reader.readLEB128();
-                    var o = Log.op("i64", "const");
-                    o.log("{d}", .{v});
-                    try self.stack.append(.{ .i64 = @intCast(v) });
+                    const v = try code_reader.readSLEB64();
+                    try self.stack.append(self.allocator, .{ .i64 = v });
+                },
+                // Arithmetic operations
+                .add => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result = a.?.i64 +% b.?.i64;
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "add");
+                    o.log("{d} + {d} = {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .sub => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result = a.?.i64 -% b.?.i64;
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "sub");
+                    o.log("{d} - {d} = {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .mul => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result = a.?.i64 *% b.?.i64;
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "mul");
+                    o.log("{d} * {d} = {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .div_s => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    if (b.?.i64 == 0) return Error.DivideByZero;
+                    
+                    if (a.?.i64 == std.math.minInt(i64) and b.?.i64 == -1) {
+                        return Error.InvalidAccess;
+                    }
+                    
+                    const result = @divTrunc(a.?.i64, b.?.i64);
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "div_s");
+                    o.log("{d} / {d} = {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .div_u => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    if (b.?.i64 == 0) return Error.DivideByZero;
+                    
+                    const ua = @as(u64, @bitCast(a.?.i64));
+                    const ub = @as(u64, @bitCast(b.?.i64));
+                    const result = @as(i64, @bitCast(@divTrunc(ua, ub)));
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "div_u");
+                    o.log("{d} (unsigned) / {d} (unsigned) = {d}", .{ ua, ub, result });
+                },
+                .rem_s => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    if (b.?.i64 == 0) return Error.DivideByZero;
+                    
+                    const result = @rem(a.?.i64, b.?.i64);
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "rem_s");
+                    o.log("{d} % {d} = {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .rem_u => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    if (b.?.i64 == 0) return Error.DivideByZero;
+                    
+                    const ua = @as(u64, @bitCast(a.?.i64));
+                    const ub = @as(u64, @bitCast(b.?.i64));
+                    const result = @as(i64, @bitCast(@rem(ua, ub)));
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "rem_u");
+                    o.log("{d} (unsigned) % {d} (unsigned) = {d}", .{ ua, ub, result });
+                },
+                // Bitwise operations
+                .@"and" => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result = a.?.i64 & b.?.i64;
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "and");
+                    o.log("{d} & {d} = {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .@"or" => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result = a.?.i64 | b.?.i64;
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "or");
+                    o.log("{d} | {d} = {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .xor => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result = a.?.i64 ^ b.?.i64;
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "xor");
+                    o.log("{d} ^ {d} = {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .shl => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const shift = @as(u6, @truncate(@as(u64, @bitCast(b.?.i64)) % 64));
+                    const result = a.?.i64 << shift;
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "shl");
+                    o.log("{d} << {d} = {d}", .{ a.?.i64, shift, result });
+                },
+                .shr_s => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const shift = @as(u6, @truncate(@as(u64, @bitCast(b.?.i64)) % 64));
+                    const result = a.?.i64 >> shift;
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "shr_s");
+                    o.log("{d} >> {d} = {d}", .{ a.?.i64, shift, result });
+                },
+                .shr_u => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const ua = @as(u64, @bitCast(a.?.i64));
+                    const shift = @as(u6, @truncate(@as(u64, @bitCast(b.?.i64)) % 64));
+                    const result = @as(i64, @bitCast(ua >> shift));
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "shr_u");
+                    o.log("{d} (unsigned) >> {d} = {d}", .{ ua, shift, result });
+                },
+                .rotl => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const ua = @as(u64, @bitCast(a.?.i64));
+                    const rotate = @as(u6, @truncate(@as(u64, @bitCast(b.?.i64)) % 64));
+                    const result = std.math.rotl(u64, ua, rotate);
+                    try self.stack.append(self.allocator, .{ .i64 = @bitCast(result) });
+                    
+                    var o = Log.op("i64", "rotl");
+                    o.log("rotl({d}, {d}) = {d}", .{ ua, rotate, result });
+                },
+                .rotr => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const ua = @as(u64, @bitCast(a.?.i64));
+                    const rotate = @as(u6, @truncate(@as(u64, @bitCast(b.?.i64)) % 64));
+                    const result = std.math.rotr(u64, ua, rotate);
+                    try self.stack.append(self.allocator, .{ .i64 = @bitCast(result) });
+                    
+                    var o = Log.op("i64", "rotr");
+                    o.log("rotr({d}, {d}) = {d}", .{ ua, rotate, result });
+                },
+                // Count operations
+                .clz => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const val = @as(u64, @bitCast(a.?.i64));
+                    const result: i64 = @intCast(@clz(val));
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "clz");
+                    o.log("clz({d}) = {d}", .{ val, result });
+                },
+                .ctz => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const val = @as(u64, @bitCast(a.?.i64));
+                    const result: i64 = @intCast(@ctz(val));
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "ctz");
+                    o.log("ctz({d}) = {d}", .{ val, result });
+                },
+                .popcnt => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const val = @as(u64, @bitCast(a.?.i64));
+                    const result: i64 = @intCast(@popCount(val));
+                    try self.stack.append(self.allocator, .{ .i64 = result });
+                    
+                    var o = Log.op("i64", "popcnt");
+                    o.log("popcnt({d}) = {d}", .{ val, result });
+                },
+                // Comparison operations  
+                .eqz => {
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.i64 == 0) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "eqz");
+                    o.log("{d} == 0 -> {d}", .{ a.?.i64, result });
+                },
+                .eq => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.i64 == b.?.i64) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "eq");
+                    o.log("{d} == {d} -> {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .ne => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.i64 != b.?.i64) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "ne");
+                    o.log("{d} != {d} -> {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .lt_s => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.i64 < b.?.i64) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "lt_s");
+                    o.log("{d} < {d} -> {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .lt_u => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const ua = @as(u64, @bitCast(a.?.i64));
+                    const ub = @as(u64, @bitCast(b.?.i64));
+                    const result: i32 = if (ua < ub) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "lt_u");
+                    o.log("{d} (unsigned) < {d} (unsigned) -> {d}", .{ ua, ub, result });
+                },
+                .gt_s => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.i64 > b.?.i64) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "gt_s");
+                    o.log("{d} > {d} -> {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .gt_u => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const ua = @as(u64, @bitCast(a.?.i64));
+                    const ub = @as(u64, @bitCast(b.?.i64));
+                    const result: i32 = if (ua > ub) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "gt_u");
+                    o.log("{d} (unsigned) > {d} (unsigned) -> {d}", .{ ua, ub, result });
+                },
+                .le_s => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.i64 <= b.?.i64) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "le_s");
+                    o.log("{d} <= {d} -> {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .le_u => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const ua = @as(u64, @bitCast(a.?.i64));
+                    const ub = @as(u64, @bitCast(b.?.i64));
+                    const result: i32 = if (ua <= ub) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "le_u");
+                    o.log("{d} (unsigned) <= {d} (unsigned) -> {d}", .{ ua, ub, result });
+                },
+                .ge_s => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const result: i32 = if (a.?.i64 >= b.?.i64) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "ge_s");
+                    o.log("{d} >= {d} -> {d}", .{ a.?.i64, b.?.i64, result });
+                },
+                .ge_u => {
+                    if (self.stack.items.len < 2) return Error.StackUnderflow;
+                    const b = self.stack.pop();
+                    const a = self.stack.pop();
+                    
+                    if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
+                        @as(ValueType, std.meta.activeTag(b.?)) != .i64)
+                        return Error.TypeMismatch;
+                    
+                    const ua = @as(u64, @bitCast(a.?.i64));
+                    const ub = @as(u64, @bitCast(b.?.i64));
+                    const result: i32 = if (ua >= ub) 1 else 0;
+                    try self.stack.append(self.allocator, .{ .i32 = result });
+                    
+                    var o = Log.op("i64", "ge_u");
+                    o.log("{d} (unsigned) >= {d} (unsigned) -> {d}", .{ ua, ub, result });
                 },
                 else => {
                     var e = Log.err("unknown", "unknown");
@@ -2996,75 +3807,34 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                 },
             },
             .f64 => |float64| switch (float64) {
+                .@"const" => {
+                    const bytes = try code_reader.readBytes(8);
+                    const bits = std.mem.readInt(u64, bytes[0..8], .little);
+                    const v: f64 = @bitCast(bits);
+                    try self.stack.append(self.allocator, .{ .f64 = v });
+                },
                 .store => {
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const offset = try code_reader.readLEB128();
-                    const alignment = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
                     const v = self.stack.pop();
                     const addr = self.stack.pop();
-                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32 or
-                        @as(ValueType, std.meta.activeTag(v.?)) != .f64)
+                    if (@as(ValueType, std.meta.activeTag(addr.?)) != .i32 or @as(ValueType, std.meta.activeTag(v.?)) != .f64)
                         return Error.TypeMismatch;
-                    if (module.memory == null) return Error.InvalidAccess;
-                    var e = Log.err("f64", "store");
-
-                    // Check for negative address
-                    if (addr.?.i32 < 0) {
-                        e.log("Invalid memory access: negative address {d}", .{addr.?.i32});
-                        return Error.InvalidAccess;
-                    }
-
-                    const effective_addr = @as(usize, @intCast(addr.?.i32)) + offset;
-                    if (effective_addr + 8 > module.memory.?.len) return Error.InvalidAccess;
-                    _ = alignment; // TODO: Use alignment
+                    const ea = try effAddr(addr.?.i32, offset);
                     const bits: u64 = @bitCast(v.?.f64);
-                    std.mem.writeInt(u64, module.memory.?[effective_addr..][0..8], bits, .little);
-
-                    Log.op("f64", "store").log("wrote value {d} at addr {d}", .{ v.?.f64, effective_addr });
+                    try self.writeLittle(u64, ea, bits);
                 },
                 .load => {
-                    // Read memory alignment and offset
-                    const flags = try code_reader.readLEB128();
+                    _ = try code_reader.readLEB128();
                     const offset = try code_reader.readLEB128();
-
-                    var o = Log.op("f64", "load");
-                    var e = Log.err("f64", "load");
-                    o.log("align={d} offset={d}", .{ flags, offset });
-
-                    if (self.stack.items.len < 1) {
-                        e.log("Stack underflow: f64.load needs an address", .{});
-                        return Error.StackUnderflow;
-                    }
-
+                    if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const addr_val = self.stack.pop();
-                    const atag = std.meta.activeTag(addr_val.?);
-                    if (@as(ValueType, atag) != .i32) {
-                        e.log("Type mismatch: f64.load expects i32 address, got {s}", .{@tagName(atag)});
-                        return Error.TypeMismatch;
-                    }
-
-                    if (module.memory == null) {
-                        e.log("Memory not initialized", .{});
-                        return Error.InvalidAccess;
-                    }
-
-                    // Check for negative address
-                    if (addr_val.?.i32 < 0) {
-                        e.log("Invalid memory access: negative address {d}", .{addr_val.?.i32});
-                        return Error.InvalidAccess;
-                    }
-
-                    const effective_addr = @as(usize, @intCast(addr_val.?.i32)) + offset;
-                    if (effective_addr + 8 > module.memory.?.len) {
-                        e.log("Memory access out of bounds: {d} + 8 > {d}", .{ effective_addr, module.memory.?.len });
-                        return Error.InvalidAccess;
-                    }
-
-                    const bits = std.mem.readInt(u64, module.memory.?[effective_addr..][0..8], .little);
-                    const loaded_value = @as(f64, @bitCast(bits));
-                    try self.stack.append(.{ .f64 = loaded_value });
-
-                    o.log("  Loaded f64 value {} from address {d}", .{ loaded_value, effective_addr });
+                    if (@as(ValueType, std.meta.activeTag(addr_val.?)) != .i32) return Error.TypeMismatch;
+                    const ea = try effAddr(addr_val.?.i32, offset);
+                    const bits = try self.readLittle(u64, ea);
+                    const loaded_value: f64 = @bitCast(bits);
+                    try self.stack.append(self.allocator, .{ .f64 = loaded_value });
                 },
                 .convert_i32_u => {
                     var o = Log.op("f64", "convert_i32_u");
@@ -3072,16 +3842,9 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const val = self.stack.pop();
                     if (@as(ValueType, std.meta.activeTag(val.?)) != .i32) return Error.TypeMismatch;
-                    try self.stack.append(.{ .f64 = @as(f64, @floatFromInt(@as(u32, @bitCast(val.?.i32)))) });
+                    try self.stack.append(self.allocator, .{ .f64 = @as(f64, @floatFromInt(@as(u32, @bitCast(val.?.i32)))) });
                 },
-                .@"const" => {
-                    // Read 8 bytes as little-endian f64
-                    const double_bytes = try code_reader.readBytes(8);
-                    const double_value = @as(f64, @bitCast(std.mem.readInt(u64, double_bytes[0..8], .little)));
-                    var o = Log.op("f64", "const");
-                    o.log("{d}", .{double_value});
-                    try self.stack.append(.{ .f64 = double_value });
-                },
+                // f64.const handled earlier in this switch
                 .convert_i32_s => {
                     var o = Log.op("f64", "convert_i32_s");
                     var e = Log.err("Error", "convert_i32_s");
@@ -3096,7 +3859,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                         e.log("  Type mismatch: expected i32, got {s}", .{@tagName(std.meta.activeTag(val.?))});
                         return Error.TypeMismatch;
                     }
-                    try self.stack.append(.{ .f64 = @as(f64, @floatFromInt(val.?.i32)) });
+                    try self.stack.append(self.allocator, .{ .f64 = @as(f64, @floatFromInt(val.?.i32)) });
                     o.log("  Result: {d}", .{@as(f64, @floatFromInt(val.?.i32))});
                 },
                 else => {
@@ -3157,116 +3920,74 @@ fn registerBlock(self: *Runtime, block_pos: usize, block_idx: usize) !void {
 }
 
 // Add this function to find matching end instruction more efficiently
-fn findMatchingEnd(self: *Runtime, func: *const Function, code_reader: *BytecodeReader, start_pos: usize, block_type: BlockType) !?usize {
-    var o = Log.op("findMatchingEnd", "");
-    o.log("Finding matching end for block at {d}", .{start_pos});
-
-    // Check if we already know the end position from a previous scan
-    if (self.block_position_map.get(start_pos)) |block_idx| {
-        if (block_idx < self.block_stack.items.len) {
-            const block = self.block_stack.items[block_idx];
-            if (block.end_pos != null) {
-                o.log("  Found cached end position: {d}", .{block.end_pos.?});
-                return block.end_pos;
-            }
-        }
-    }
-
-    // If not cached, do a single scan with optimized code
-    var depth: usize = 1; // Start at depth 1 for our current block
-    var search_pos = code_reader.pos;
-
-    o.log("  Starting search at position {d}", .{search_pos});
-
-    while (search_pos < func.code.len) {
-        const search_opcode = func.code[search_pos];
-        search_pos += 1;
-
-        // Fast path for most common opcodes that aren't control flow
-        if (search_opcode > 0x0B) { // Skip non-control flow opcodes
-            // Handle multi-byte instructions efficiently
-            switch (search_opcode) {
-                // Skip known multi-byte instructions based on their patterns
-                0x20, 0x21, 0x22, 0x23, 0x24 => { // local/global ops
-                    // Skip over the LEB128 index
-                    while (search_pos < func.code.len and (func.code[search_pos] & 0x80) != 0) {
-                        search_pos += 1;
-                    }
-                    search_pos += 1; // Skip the last byte
-                },
-                0x28, 0x29, 0x2A, 0x2B, 0x36, 0x37, 0x38, 0x39 => { // memory ops
-                    // Skip alignment and offset
-                    while (search_pos < func.code.len and (func.code[search_pos] & 0x80) != 0) {
-                        search_pos += 1;
-                    }
-                    search_pos += 1; // Skip last byte of align
-                    while (search_pos < func.code.len and (func.code[search_pos] & 0x80) != 0) {
-                        search_pos += 1;
-                    }
-                    search_pos += 1; // Skip last byte of offset
-                },
-                0x41 => { // i32.const
-                    // Skip LEB128 value
-                    while (search_pos < func.code.len and (func.code[search_pos] & 0x80) != 0) {
-                        search_pos += 1;
-                    }
-                    search_pos += 1; // Skip the last byte
-                },
-                0x42 => { // i64.const
-                    // Skip LEB128 value (can be longer)
-                    while (search_pos < func.code.len and (func.code[search_pos] & 0x80) != 0) {
-                        search_pos += 1;
-                    }
-                    search_pos += 1; // Skip the last byte
-                },
-                0x43 => search_pos += 4, // f32.const
-                0x44 => search_pos += 8, // f64.const
-                else => {}, // Single byte instruction
-            }
-            continue;
-        }
-
-        // Handle control flow instructions
-        switch (search_opcode) {
-            0x02, 0x03, 0x04 => { // block, loop, if
+fn findMatchingEnd(_: *Runtime, func: *const Function, _: *BytecodeReader, start_pos: usize, _: BlockType) !?usize {
+    var r = Module.Reader.init(func.code);
+    r.pos = start_pos;
+    var depth: usize = 1;
+    while (r.pos < func.code.len) {
+        const op = try r.readByte();
+        switch (op) {
+            0x02, 0x03, 0x04 => {
                 depth += 1;
-                // Skip over the block type
-                const block_type = func.code[search_pos];
-                search_pos += 1;
-
-                // Handle extended block types correctly
-                if (block_type != 0x40 and block_type != 0x7F and
-                    block_type != 0x7E and block_type != 0x7D and
-                    block_type != 0x7C)
-                {
-                    // Extended block type - skip LEB128
-                    while (search_pos < func.code.len and (func.code[search_pos] & 0x80) != 0) {
-                        search_pos += 1;
-                    }
-                    search_pos += 1; // Skip the last byte
+                const bt = try r.readByte();
+                if (bt != 0x40 and bt != 0x7F and bt != 0x7E and bt != 0x7D and bt != 0x7C) {
+                    _ = try r.readLEB128();
                 }
             },
-            0x05 => {}, // else - doesn't change depth
-            0x0B => { // end
+            0x0B => {
                 depth -= 1;
-                if (depth == 0) {
-                    // Found the matching end
-                    o.log("  Found matching end at position {d}", .{search_pos - 1});
-
-                    // Cache this result for future lookups
-                    if (self.block_position_map.get(start_pos)) |block_idx| {
-                        if (block_idx < self.block_stack.items.len) {
-                            self.block_stack.items[block_idx].end_pos = search_pos - 1;
-                        }
-                    }
-
-                    return search_pos - 1;
-                }
+                if (depth == 0) return r.pos - 1;
             },
-            else => {}, // Other control instructions - ignore
+            else => try skipInstruction(&r),
         }
     }
-
-    o.log("  No matching end found, reached end of function", .{});
     return null;
+}
+
+const ElseEnd = struct { else_pos: ?usize, end_pos: usize };
+
+fn findElseOrEnd(_: *Runtime, func: *const Function, _: *BytecodeReader, start_pos: usize) !?ElseEnd {
+    var r = Module.Reader.init(func.code);
+    r.pos = start_pos;
+    var depth: usize = 1;
+    while (r.pos < func.code.len) {
+        const op = try r.readByte();
+        switch (op) {
+            0x02, 0x03, 0x04 => {
+                depth += 1;
+                const bt = try r.readByte();
+                if (bt != 0x40 and bt != 0x7F and bt != 0x7E and bt != 0x7D and bt != 0x7C) {
+                    _ = try r.readLEB128();
+                }
+            },
+            0x05 => { if (depth == 1) return ElseEnd{ .else_pos = r.pos - 1, .end_pos = undefined }; },
+            0x0B => { depth -= 1; if (depth == 0) return ElseEnd{ .else_pos = null, .end_pos = r.pos - 1 }; },
+            else => try skipInstruction(&r),
+        }
+    }
+    return null;
+}
+// Skip immediates for a single non-control instruction
+fn skipInstruction(reader: *BytecodeReader) !void {
+    const op = try reader.readByte();
+    switch (op) {
+        // local/global get/set/tee
+        0x20, 0x21, 0x22, 0x23, 0x24 => { _ = try reader.readLEB128(); },
+        // memory loads/stores (align, offset)
+        0x28, 0x29, 0x2A, 0x2B, 0x36, 0x37, 0x38, 0x39 => {
+            _ = try reader.readLEB128();
+            _ = try reader.readLEB128();
+        },
+        // i32.const / i64.const
+        0x41 => { _ = try reader.readSLEB32(); },
+        0x42 => { _ = try reader.readSLEB64(); },
+        // f32.const / f64.const
+        0x43 => { _ = try reader.readBytes(4); },
+        0x44 => { _ = try reader.readBytes(8); },
+        // call
+        0x10 => { _ = try reader.readLEB128(); },
+        // br / br_if
+        0x0C, 0x0D => { _ = try reader.readLEB128(); },
+        else => {},
+    }
 }

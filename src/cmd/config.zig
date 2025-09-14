@@ -7,6 +7,7 @@ dir: ?[]const u8 = undefined,
 file: ?[]const u8 = undefined,
 config: @import("../config.zig"),
 debug: bool = false,
+validate: bool = true,
 help: bool = false,
 version: []const u8 = "0.1.0",
 
@@ -22,6 +23,7 @@ pub fn init() @This() {
         .dir = null,
         .file = null,
         .debug = false,
+        .validate = true,
         .version = "0.1.0",
         .help = false,
     };
@@ -57,11 +59,13 @@ pub fn fromArgs(args: [][:0]u8) @This() {
     for (args) |arg| {
         if (is(arg, "--debug", "-d"))
             o.debug = true
+        else if (is(arg, "--no-validate", ""))
+            o.validate = false
         else if (is(arg, "--version", "-v"))
             ol.log("Version: {s}\n", .{o.version})
         else if (is(arg, "--help", "-h"))
             o.help = true
-        else
+        else if (o.debug)
             ol.log("Unknown argument: {s}\n", .{arg});
     }
     return o;

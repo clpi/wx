@@ -15,6 +15,10 @@ pub const Reader = @import("module/reader.zig");
 pub const Global = @import("module/global.zig");
 pub const Type = @import("module/type.zig");
 
+// Lightweight block summary for validator/runtime use
+pub const BlockSummary = struct { start_pos: usize, end_pos: usize };
+pub const FunctionCFG = struct { blocks: []BlockSummary = &[_]BlockSummary{} };
+
 pub const Section = enum(u8) {
     custom = 0,
     type = 1,
@@ -39,19 +43,21 @@ globals: std.ArrayList(Global),
 imports: std.ArrayList(Import),
 exports: std.ArrayList(Export),
 start_function_index: ?u32,
+cfg: std.ArrayList(FunctionCFG),
 
 pub fn init(allocator: std.mem.Allocator) !*Module {
     const module = try allocator.create(Module);
     module.* = .{
         .allocator = allocator,
-        .functions = std.ArrayList(*Function).init(allocator),
-        .types = std.ArrayList(Signature).init(allocator),
+        .functions = try std.ArrayList(*Function).initCapacity(allocator, 0),
+        .types = try std.ArrayList(Signature).initCapacity(allocator, 0),
         .memory = null,
         .table = null,
-        .globals = std.ArrayList(Global).init(allocator),
-        .imports = std.ArrayList(Import).init(allocator),
-        .exports = std.ArrayList(Export).init(allocator),
+        .globals = try std.ArrayList(Global).initCapacity(allocator, 0),
+        .imports = try std.ArrayList(Import).initCapacity(allocator, 0),
+        .exports = try std.ArrayList(Export).initCapacity(allocator, 0),
         .start_function_index = null,
+        .cfg = try std.ArrayList(FunctionCFG).initCapacity(allocator, 0),
     };
     return module;
 }
@@ -69,8 +75,8 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
     const module = try Module.init(allocator);
     errdefer module.deinit();
 
-    var function_type_indices = std.ArrayList(u32).init(allocator);
-    defer function_type_indices.deinit();
+    var function_type_indices = try std.ArrayList(u32).initCapacity(allocator, 0);
+    defer function_type_indices.deinit(allocator);
 
     // Initialize default memory (65536 bytes = 1 page)
     module.memory = try allocator.alloc(u8, 65536);
@@ -95,6 +101,8 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                 _ = o;
                 var type_reader = Reader.init(section_data);
                 const count = try type_reader.readLEB128();
+                // Reserve capacity to avoid reallocations while appending
+                try module.types.ensureTotalCapacityPrecise(allocator, module.types.items.len + count);
                 var i: usize = 0;
                 while (i < count) : (i += 1) {
                     const form = try type_reader.readByte();
@@ -114,7 +122,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                         results[j] = try ValueType.fromByte(val_type);
                     }
 
-                    try module.types.append(.{
+                    try module.types.append(allocator, .{
                         .params = params,
                         .results = results,
                     });
@@ -126,6 +134,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                 o.log("Parsing import section (size: {d})", .{section_size});
                 var import_reader = Reader.init(section_data);
                 const count = try import_reader.readLEB128();
+                try module.imports.ensureTotalCapacityPrecise(allocator, module.imports.items.len + count);
                 o.log("  Found {d} imports", .{count});
 
                 var i: usize = 0;
@@ -160,7 +169,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                                 .imported = true,
                             };
 
-                            try module.functions.append(func);
+                            try module.functions.append(allocator, func);
                         },
                         0x01 => { // Table import
                             import_type = .table;
@@ -179,10 +188,10 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
 
                             // Initialize table with null references
                             if (module.table == null) {
-                                var table = std.ArrayList(value.Value).init(allocator);
-                                errdefer table.deinit();
+                                var table = try std.ArrayList(value.Value).initCapacity(allocator, 0);
+                                errdefer table.deinit(allocator);
 
-                                try table.resize(initial_size);
+                                try table.resize(allocator, initial_size);
                                 for (table.items) |*item| {
                                     item.* = .{ .funcref = null };
                                 }
@@ -228,7 +237,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                                 else => return error.InvalidType,
                             };
 
-                            try module.globals.append(.{
+                            try module.globals.append(allocator, .{
                                 .value = default_val,
                                 .mutable = mutability == 1,
                             });
@@ -240,7 +249,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                     const module_name_copy = try allocator.dupe(u8, module_name);
                     const field_name_copy = try allocator.dupe(u8, field_name);
 
-                    try module.imports.append(.{
+                    try module.imports.append(allocator, .{
                         .module = module_name_copy,
                         .name = field_name_copy,
                         .kind = @as(Export.Type, import_type),
@@ -256,10 +265,12 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                 // Function section
                 var func_reader = Reader.init(section_data);
                 const count = try func_reader.readLEB128();
+                // Reserve for defined functions (in addition to already appended imported ones)
+                try module.functions.ensureTotalCapacityPrecise(allocator, module.functions.items.len + count);
                 var i: usize = 0;
                 while (i < count) : (i += 1) {
                     const type_idx = try func_reader.readLEB128();
-                    try function_type_indices.append(type_idx);
+                    try function_type_indices.append(allocator, type_idx);
                 }
             },
             4 => {
@@ -287,10 +298,10 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
 
                     // Initialize table with null references if not already initialized
                     if (module.table == null) {
-                        var table = std.ArrayList(value.Value).init(allocator);
-                        errdefer table.deinit();
+                        var table = try std.ArrayList(value.Value).initCapacity(allocator, 0);
+                        errdefer table.deinit(allocator);
 
-                        try table.resize(initial_size);
+                        try table.resize(allocator, initial_size);
                         for (table.items) |*item| {
                             item.* = .{ .funcref = null };
                         }
@@ -299,7 +310,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                     } else {
                         // If table exists, ensure it's at least as large as initial_size
                         if (module.table.?.items.len < initial_size) {
-                            try module.table.?.resize(initial_size);
+                            try module.table.?.resize(allocator, initial_size);
                             for (module.table.?.items[module.table.?.items.len - (initial_size - module.table.?.items.len) ..]) |*item| {
                                 item.* = .{ .funcref = null };
                             }
@@ -341,6 +352,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                 // Global section
                 var global_reader = Reader.init(section_data);
                 const count = try global_reader.readLEB128();
+                try module.globals.ensureTotalCapacityPrecise(allocator, module.globals.items.len + count);
                 var o = Log.op("global", "section");
                 o.log("Parsing {d} globals", .{count});
 
@@ -381,7 +393,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                     const end_opcode = try global_reader.readByte();
                     if (end_opcode != 0x0b) return error.InvalidModule;
 
-                    try module.globals.append(.{
+                    try module.globals.append(allocator, .{
                         .value = init_value,
                         .mutable = mutability == 1,
                     });
@@ -394,6 +406,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                 o.log("Parsing export section (size: {d})", .{section_size});
                 var export_reader = Reader.init(section_data);
                 const count = try export_reader.readLEB128();
+                try module.exports.ensureTotalCapacityPrecise(allocator, module.exports.items.len + count);
                 o.log("  Found {d} exports", .{count});
 
                 var i: usize = 0;
@@ -410,7 +423,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                     const name_copy = try allocator.dupe(u8, name);
 
                     // Add to exports
-                    try module.exports.append(.{
+                    try module.exports.append(allocator, .{
                         .name = name_copy,
                         .kind = @import("module/Export.zig").Type.fromByte(kind),
                         .index = index,
@@ -494,7 +507,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                     // Ensure table is large enough
                     if (offset + num_elems > module.table.?.items.len) {
                         o.log("  Warning: Element segment extends beyond table size. Growing table from {d} to {d}", .{ module.table.?.items.len, offset + num_elems });
-                        try module.table.?.resize(offset + num_elems);
+                        try module.table.?.resize(allocator, offset + num_elems);
                         for (module.table.?.items[module.table.?.items.len - num_elems ..]) |*item| {
                             item.* = .{ .funcref = null };
                         }
@@ -534,6 +547,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                 // Code section
                 var code_reader = Reader.init(section_data);
                 const count = try code_reader.readLEB128();
+                try module.cfg.ensureTotalCapacityPrecise(allocator, module.cfg.items.len + count);
                 if (count != function_type_indices.items.len) return error.InvalidModule;
 
                 var i: usize = 0;
@@ -551,8 +565,8 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                     if (local_decl_count > 1000) return error.InvalidModule; // Sanity check
                     o.log("Local declarations count: {d}", .{local_decl_count});
 
-                    var locals_tmp = std.ArrayList(ValueType).init(allocator);
-                    defer locals_tmp.deinit();
+                    var locals_tmp = try std.ArrayList(ValueType).initCapacity(allocator, 0);
+                    defer locals_tmp.deinit(allocator);
 
                     var j: usize = 0;
                     while (j < local_decl_count) : (j += 1) {
@@ -568,7 +582,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
 
                         var k: usize = 0;
                         while (k < repeat_count) : (k += 1) {
-                            try locals_tmp.append(local_type);
+                            try locals_tmp.append(allocator, local_type);
                         }
                     }
 
@@ -589,7 +603,9 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                         .code = section_data[code_start..body_end],
                         .locals = locals,
                     };
-                    try module.functions.append(func);
+                    try module.functions.append(allocator, func);
+                    // Placeholder CFG slot; filled during validation
+                    try module.cfg.append(allocator, .{ .blocks = &[_]BlockSummary{} });
 
                     // Skip to end of function body
                     code_reader.pos = body_end;
@@ -714,17 +730,17 @@ pub fn deinit(self: *Module) void {
         self.allocator.free(exp.name);
     }
 
-    self.functions.deinit();
-    self.types.deinit();
+    self.functions.deinit(self.allocator);
+    self.types.deinit(self.allocator);
     if (self.memory) |mem| {
         self.allocator.free(mem);
     }
     if (self.table) |*table| {
-        table.deinit();
+        table.deinit(self.allocator);
     }
-    self.globals.deinit();
-    self.imports.deinit();
-    self.exports.deinit();
+    self.globals.deinit(self.allocator);
+    self.imports.deinit(self.allocator);
+    self.exports.deinit(self.allocator);
     self.allocator.destroy(self);
 }
 
@@ -876,70 +892,58 @@ pub fn initMemory(self: *Module) !void {
 pub fn validateModule(self: *Module) !void {
     var o = Log.op("validateModule", "");
     o.log("Validating WebAssembly module", .{});
-    
+
     // 1. Validate function signatures against type section
     o.log("Validating {d} functions against type section", .{self.functions.items.len});
     for (self.functions.items, 0..) |func, idx| {
         if (func.type_index >= self.types.items.len) {
-            o.log("Error: Function {d} has invalid type index {d} (max: {d})", .{ 
-                idx, func.type_index, self.types.items.len - 1 
-            });
+            o.log("Error: Function {d} has invalid type index {d} (max: {d})", .{ idx, func.type_index, self.types.items.len - 1 });
             return error.InvalidTypeIndex;
         }
     }
-    
+
     // 2. Validate imports
     o.log("Validating {d} imports", .{self.imports.items.len});
     for (self.imports.items, 0..) |import, idx| {
         if (import.kind == .function) {
             if (import.type_index >= self.types.items.len) {
-                o.log("Error: Import {d} ({s}::{s}) has invalid type index {d} (max: {d})", .{ 
-                    idx, import.module, import.name, import.type_index, self.types.items.len - 1 
-                });
+                o.log("Error: Import {d} ({s}::{s}) has invalid type index {d} (max: {d})", .{ idx, import.module, import.name, import.type_index, self.types.items.len - 1 });
                 return error.InvalidTypeIndex;
             }
         }
     }
-    
+
     // 3. Validate exports
     o.log("Validating {d} exports", .{self.exports.items.len});
     for (self.exports.items, 0..) |export_item, idx| {
         switch (export_item.kind) {
             .function => {
                 if (export_item.index >= self.functions.items.len) {
-                    o.log("Error: Export {d} ({s}) references invalid function index {d} (max: {d})", .{ 
-                        idx, export_item.name, export_item.index, self.functions.items.len - 1 
-                    });
+                    o.log("Error: Export {d} ({s}) references invalid function index {d} (max: {d})", .{ idx, export_item.name, export_item.index, self.functions.items.len - 1 });
                     return error.InvalidExportIndex;
-                },
+                }
             },
             .memory => {
                 if (self.memory == null) {
-                    o.log("Error: Export {d} ({s}) references memory but no memory section exists", .{ 
-                        idx, export_item.name 
-                    });
+                    o.log("Error: Export {d} ({s}) references memory but no memory section exists", .{ idx, export_item.name });
                     return error.InvalidExport;
-                },
+                }
             },
             .table => {
                 if (self.table == null) {
-                    o.log("Error: Export {d} ({s}) references table but no table section exists", .{ 
-                        idx, export_item.name 
-                    });
+                    o.log("Error: Export {d} ({s}) references table but no table section exists", .{ idx, export_item.name });
                     return error.InvalidExport;
-                },
+                }
             },
             .global => {
                 if (export_item.index >= self.globals.items.len) {
-                    o.log("Error: Export {d} ({s}) references invalid global index {d} (max: {d})", .{ 
-                        idx, export_item.name, export_item.index, self.globals.items.len - 1 
-                    });
+                    o.log("Error: Export {d} ({s}) references invalid global index {d} (max: {d})", .{ idx, export_item.name, export_item.index, self.globals.items.len - 1 });
                     return error.InvalidExportIndex;
                 }
             },
         }
     }
-    
+
     // 4. Validate function code
     o.log("Validating function code", .{});
     for (self.functions.items, 0..) |func, idx| {
@@ -948,66 +952,85 @@ pub fn validateModule(self: *Module) !void {
             try validateFunctionCode(self, func, idx);
         }
     }
-    
+
     o.log("Module validation complete", .{});
 }
 
 /// Validates the bytecode of a single function
 fn validateFunctionCode(module: *Module, func: *Function, func_idx: usize) !void {
     var o = Log.op("validateFunctionCode", "");
-    o.log("Validating function {d} code ({d} bytes)", .{func_idx, func.code.len});
-    
+    o.log("Validating function {d} code ({d} bytes)", .{ func_idx, func.code.len });
+
     // Create a reader for the function code
-    var code_reader = BytecodeReader{ .data = func.code, .pos = 0 };
-    
-    // Track blocks for balance checking
-    var block_depth: usize = 0;
-    
+    var code_reader = Reader.init(func.code);
+
+    // Quick pre-scan to size validation stacks (approximate # of blocks)
+    var approx_blocks: usize = 0;
+    for (func.code) |b| {
+        switch (b) {
+            0x02, 0x03, 0x04 => approx_blocks += 1, // block/loop/if
+            else => {},
+        }
+    }
+
+    // Track blocks for balance checking (function body is implicit block)
+    var block_depth: usize = 1;
+    var blocks = try std.ArrayList(BlockSummary).initCapacity(module.allocator, @max(8, approx_blocks + 2));
+    defer blocks.deinit(module.allocator);
+    var start_stack = try std.ArrayList(usize).initCapacity(module.allocator, @max(8, approx_blocks + 2));
+    defer start_stack.deinit(module.allocator);
+    const ElseOpen = struct { end_depth: usize, idx: usize };
+    var else_stack = try std.ArrayList(ElseOpen).initCapacity(module.allocator, @max(4, approx_blocks));
+    defer else_stack.deinit(module.allocator);
+
     // Track value types on conceptual stack for type checking
-    var type_stack = std.ArrayList(ValueType).init(module.allocator);
-    defer type_stack.deinit();
-    
+    var type_stack = try std.ArrayList(ValueType).initCapacity(module.allocator, 0);
+    defer type_stack.deinit(module.allocator);
+
     // Get the function type
     const func_type = module.types.items[func.type_index];
-    
+
     // Add locals (parameters + locals)
-    var locals = std.ArrayList(ValueType).init(module.allocator);
-    defer locals.deinit();
-    
+    var locals = try std.ArrayList(ValueType).initCapacity(module.allocator, 0);
+    defer locals.deinit(module.allocator);
+
     // Add parameters as locals first
-    try locals.appendSlice(func_type.params);
-    
+    try locals.appendSlice(module.allocator, func_type.params);
+
     // Add function-defined locals
     for (func.locals) |local_type| {
-        try locals.append(local_type);
+        try locals.append(module.allocator, local_type);
     }
-    
+
     while (code_reader.pos < func.code.len) {
         const opcode = code_reader.readByte() catch |err| {
-            o.log("Error reading opcode at position {d}: {any}", .{code_reader.pos, err});
+            o.log("Error reading opcode at position {d}: {any}", .{ code_reader.pos, err });
             return err;
         };
-        
+
         // Handle control flow instructions
         switch (opcode) {
             0x02, 0x03, 0x04 => { // block, loop, if
+                // Record start position of this block (current opcode was at pos-1)
+                const start_pos = code_reader.pos - 1;
+                try start_stack.append(module.allocator, start_pos);
                 block_depth += 1;
-                
+
                 // Skip block type
                 _ = code_reader.readByte() catch |err| {
-                    o.log("Error reading block type at position {d}: {any}", .{code_reader.pos, err});
+                    o.log("Error reading block type at position {d}: {any}", .{ code_reader.pos, err });
                     return err;
                 };
-                
+
                 // For if instructions, ensure there's a condition value
                 if (opcode == 0x04 and type_stack.items.len == 0) {
                     o.log("Error: if instruction at position {d} without condition value", .{code_reader.pos - 2});
                     return error.TypeMismatch;
                 }
-                
+
                 // Pop the condition for if
                 if (opcode == 0x04) {
-                    const condition_type = type_stack.popOrNull();
+                    const condition_type = type_stack.pop();
                     if (condition_type == null or condition_type.? != .i32) {
                         o.log("Error: if instruction at position {d} with invalid condition type", .{code_reader.pos - 2});
                         return error.TypeMismatch;
@@ -1019,6 +1042,11 @@ fn validateFunctionCode(module: *Module, func: *Function, func_idx: usize) !void
                     o.log("Error: else instruction at position {d} without matching if", .{code_reader.pos - 1});
                     return error.InvalidCode;
                 }
+                const else_pos = code_reader.pos - 1;
+                const idx = blocks.items.len;
+                try blocks.append(module.allocator, .{ .start_pos = else_pos, .end_pos = 0 });
+                // Matching end will reduce depth by 1
+                try else_stack.append(module.allocator, .{ .end_depth = block_depth - 1, .idx = idx });
                 // Note: we don't decrement block_depth for else
             },
             0x0B => { // end
@@ -1027,49 +1055,58 @@ fn validateFunctionCode(module: *Module, func: *Function, func_idx: usize) !void
                     return error.InvalidCode;
                 }
                 block_depth -= 1;
+                const end_pos = code_reader.pos - 1;
+                const start_opt = if (start_stack.items.len > 0) start_stack.pop() else null;
+                const start_pos = if (start_opt) |sp| sp else 0;
+                try blocks.append(module.allocator, .{ .start_pos = start_pos, .end_pos = end_pos });
+                // If an else region is open for this depth, close it now
+                if (else_stack.items.len > 0) {
+                    const top = else_stack.items[else_stack.items.len - 1];
+                    if (top.end_depth == block_depth) {
+                        else_stack.items.len -= 1;
+                        blocks.items[top.idx].end_pos = end_pos;
+                    }
+                }
             },
             // Handle local access
             0x20 => { // local.get
                 const local_idx = code_reader.readLEB128() catch |err| {
-                    o.log("Error reading local index at position {d}: {any}", .{code_reader.pos, err});
+                    o.log("Error reading local index at position {d}: {any}", .{ code_reader.pos, err });
                     return err;
                 };
-                
+
                 if (local_idx >= locals.items.len) {
-                    o.log("Error: local.get at position {d} references invalid local index {d} (max: {d})", .{ 
-                        code_reader.pos - 2, local_idx, locals.items.len - 1 
-                    });
+                    o.log("Error: local.get at position {d} references invalid local index {d} (max: {d})", .{ code_reader.pos - 2, local_idx, locals.items.len - 1 });
                     return error.InvalidLocalIndex;
                 }
-                
+
                 // Push the local's type onto the stack
-                try type_stack.append(locals.items[local_idx]);
+                try type_stack.append(module.allocator, locals.items[local_idx]);
             },
             0x21 => { // local.set
                 const local_idx = code_reader.readLEB128() catch |err| {
-                    o.log("Error reading local index at position {d}: {any}", .{code_reader.pos, err});
+                    o.log("Error reading local index at position {d}: {any}", .{ code_reader.pos, err });
                     return err;
                 };
-                
+
                 if (local_idx >= locals.items.len) {
-                    o.log("Error: local.set at position {d} references invalid local index {d} (max: {d})", .{ 
-                        code_reader.pos - 2, local_idx, locals.items.len - 1 
-                    });
+                    o.log("Error: local.set at position {d} references invalid local index {d} (max: {d})", .{ code_reader.pos - 2, local_idx, locals.items.len - 1 });
                     return error.InvalidLocalIndex;
                 }
-                
+
                 // Check for stack underflow
                 if (type_stack.items.len == 0) {
                     o.log("Error: local.set at position {d} with empty stack", .{code_reader.pos - 2});
                     return error.StackUnderflow;
                 }
-                
+
                 // Pop the value type and check compatibility
-                const value_type = type_stack.pop();
+                const value_type = type_stack.pop() orelse {
+                    o.log("Error: local.set at position {d} with empty stack", .{code_reader.pos - 2});
+                    return error.StackUnderflow;
+                };
                 if (value_type != locals.items[local_idx]) {
-                    o.log("Error: local.set at position {d} with incompatible types: expected {s}, got {s}", .{ 
-                        code_reader.pos - 2, @tagName(locals.items[local_idx]), @tagName(value_type) 
-                    });
+                    o.log("Error: local.set at position {d} with incompatible types: expected {s}, got {s}", .{ code_reader.pos - 2, @tagName(locals.items[local_idx]), @tagName(value_type) });
                     return error.TypeMismatch;
                 }
             },
@@ -1077,35 +1114,36 @@ fn validateFunctionCode(module: *Module, func: *Function, func_idx: usize) !void
             0x28, 0x29, 0x2A, 0x2B => { // i32.load, i64.load, f32.load, f64.load
                 // Skip alignment and offset
                 _ = code_reader.readLEB128() catch |err| {
-                    o.log("Error reading alignment at position {d}: {any}", .{code_reader.pos, err});
+                    o.log("Error reading alignment at position {d}: {any}", .{ code_reader.pos, err });
                     return err;
                 };
                 _ = code_reader.readLEB128() catch |err| {
-                    o.log("Error reading offset at position {d}: {any}", .{code_reader.pos, err});
+                    o.log("Error reading offset at position {d}: {any}", .{ code_reader.pos, err });
                     return err;
                 };
-                
+
                 // Check for memory section
                 if (module.memory == null) {
                     o.log("Error: memory operation at position {d} but no memory section exists", .{code_reader.pos - 3});
                     return error.InvalidMemoryAccess;
                 }
-                
+
                 // Check for address on stack
                 if (type_stack.items.len == 0) {
                     o.log("Error: memory load at position {d} with empty stack", .{code_reader.pos - 3});
                     return error.StackUnderflow;
                 }
-                
+
                 // Pop address and check type
-                const addr_type = type_stack.pop();
+                const addr_type = type_stack.pop() orelse {
+                    o.log("Error: memory load at position {d} with empty stack", .{code_reader.pos - 3});
+                    return error.StackUnderflow;
+                };
                 if (addr_type != .i32) {
-                    o.log("Error: memory load at position {d} with non-i32 address type: {s}", .{ 
-                        code_reader.pos - 3, @tagName(addr_type) 
-                    });
+                    o.log("Error: memory load at position {d} with non-i32 address type: {s}", .{ code_reader.pos - 3, @tagName(addr_type) });
                     return error.TypeMismatch;
                 }
-                
+
                 // Push result type based on opcode
                 const result_type: ValueType = switch (opcode) {
                     0x28 => .i32,
@@ -1114,7 +1152,7 @@ fn validateFunctionCode(module: *Module, func: *Function, func_idx: usize) !void
                     0x2B => .f64,
                     else => unreachable,
                 };
-                try type_stack.append(result_type);
+                try type_stack.append(module.allocator, result_type);
             },
             // Skip other opcodes for brevity - a real implementation would validate all opcodes
             else => {
@@ -1123,34 +1161,42 @@ fn validateFunctionCode(module: *Module, func: *Function, func_idx: usize) !void
             },
         }
     }
-    
+
     // After processing all opcodes, ensure blocks are balanced
     if (block_depth != 0) {
         o.log("Error: Function has {d} unclosed blocks", .{block_depth});
         return error.UnbalancedBlocks;
     }
-    
+
     // For functions with results, ensure the correct number of values are on the stack
     if (func_type.results.len > 0) {
         if (type_stack.items.len < func_type.results.len) {
-            o.log("Error: Function has insufficient return values on stack: expected {d}, got {d}", .{ 
-                func_type.results.len, type_stack.items.len 
-            });
+            o.log("Error: Function has insufficient return values on stack: expected {d}, got {d}", .{ func_type.results.len, type_stack.items.len });
             return error.InvalidReturnValue;
         }
-        
+
         // Check result types match function signature
         const stack_pos = type_stack.items.len - func_type.results.len;
         for (func_type.results, 0..) |expected_type, i| {
             const actual_type = type_stack.items[stack_pos + i];
             if (expected_type != actual_type) {
-                o.log("Error: Function return type mismatch at position {d}: expected {s}, got {s}", .{ 
-                    i, @tagName(expected_type), @tagName(actual_type) 
-                });
+                o.log("Error: Function return type mismatch at position {d}: expected {s}, got {s}", .{ i, @tagName(expected_type), @tagName(actual_type) });
                 return error.TypeMismatch;
             }
         }
     }
-    
+
     o.log("Function {d} code validation succeeded", .{func_idx});
+
+    // Store block summaries
+    const slice = try module.allocator.dupe(BlockSummary, blocks.items);
+    if (func_idx < module.cfg.items.len) {
+        module.cfg.items[func_idx].blocks = slice;
+    } else {
+        // Ensure cfg has slots up to func_idx
+        while (module.cfg.items.len < func_idx) {
+            try module.cfg.append(module.allocator, .{ .blocks = &[_]BlockSummary{} });
+        }
+        try module.cfg.append(module.allocator, .{ .blocks = slice });
+    }
 }

@@ -6,9 +6,9 @@ const proc = std.process;
 const Config = @This();
 
 subcmd: [:0]u8 = undefined,
-args: std.ArrayList(Opt) = std.ArrayList(Opt).init(heap.page_allocator),
-cmds: std.ArrayList(Opt) = std.ArrayList(Opt).init(heap.page_allocator),
-config: std.StringHashMap([]const u8) = std.StringHashMap([]const u8).init(heap.page_allocator),
+args: std.ArrayList(Opt) = undefined,
+cmds: std.ArrayList(Opt) = undefined,
+config: std.StringHashMap([]const u8) = undefined,
 config_file: []const u8,
 config_dir: []const u8,
 
@@ -162,6 +162,8 @@ pub fn parseArgs(a: mem.Allocator, args: []const [:0]u8) !@This() {
         .args = std.ArrayList(Opt).init(a),
         .cmds = std.ArrayList(Opt).init(a),
         .subcmd = undefined,
+        .config_file = "",
+        .config_dir = "",
     };
 
     var first = true;

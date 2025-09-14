@@ -10,19 +10,19 @@ const WASI = @This();
 allocator: std.mem.Allocator,
 args: [][:0]u8,
 stdout_buffer: std.ArrayList(u8),
-debug: bool = true,
+debug: bool = false,
 
 pub fn init(allocator: std.mem.Allocator, args: [][:0]u8) !WASI {
     return WASI{
         .allocator = allocator,
         .args = args,
-        .stdout_buffer = std.ArrayList(u8).init(allocator),
-        .debug = true,
+        .stdout_buffer = try std.ArrayList(u8).initCapacity(allocator, 0),
+        .debug = false,
     };
 }
 
 pub fn deinit(self: *WASI) void {
-    self.stdout_buffer.deinit();
+    self.stdout_buffer.deinit(self.allocator);
 }
 
 /// Initialize the WASM module with WASI imports
@@ -42,82 +42,10 @@ pub fn setupModule(self: *WASI, runtime: *Runtime, module: *Module) !void {
     const args_info = try self.setupArgs(module);
     o.log("Initialized args: argc={d}, argv_ptr={d}\n", .{ args_info.argc, args_info.argv_ptr });
 
-    // Add function types for WASI imports
-    const i32_type = Runtime.ValueType.i32;
-    const i64_type = Runtime.ValueType.i64;
-
-    // fd_write: (i32, i32, i32, i32) -> i32
-    const fd_write_type_idx = module.types.items.len;
-    try module.types.append(.{
-        .params = try runtime.allocator.dupe(Runtime.ValueType, &[_]Runtime.ValueType{ i32_type, i32_type, i32_type, i32_type }),
-        .results = try runtime.allocator.dupe(Runtime.ValueType, &[_]Runtime.ValueType{i32_type}),
-    });
-
-    // fd_seek: (i32, i64, i32, i32) -> i32
-    const fd_seek_type_idx = module.types.items.len;
-    try module.types.append(.{
-        .params = try runtime.allocator.dupe(Runtime.ValueType, &[_]Runtime.ValueType{ i32_type, i64_type, i32_type, i32_type }),
-        .results = try runtime.allocator.dupe(Runtime.ValueType, &[_]Runtime.ValueType{i32_type}),
-    });
-
-    // environ_sizes_get, environ_get, args_sizes_get, args_get: (i32, i32) -> i32
-    const two_i32_to_i32_type_idx = module.types.items.len;
-    try module.types.append(.{
-        .params = try runtime.allocator.dupe(Runtime.ValueType, &[_]Runtime.ValueType{ i32_type, i32_type }),
-        .results = try runtime.allocator.dupe(Runtime.ValueType, &[_]Runtime.ValueType{i32_type}),
-    });
-
-    // proc_exit: (i32) -> void
-    const proc_exit_type_idx = module.types.items.len;
-    try module.types.append(.{
-        .params = try runtime.allocator.dupe(Runtime.ValueType, &[_]Runtime.ValueType{i32_type}),
-        .results = try runtime.allocator.dupe(Runtime.ValueType, &[_]Runtime.ValueType{}),
-    });
-
-    // Add WASI imports with correct type indices
-    try module.imports.append(.{ .module = try runtime.allocator.dupe(u8, "wasi_snapshot_preview1"), .name = try runtime.allocator.dupe(u8, "fd_write"), .kind = .function, .type_index = @intCast(fd_write_type_idx) });
-
-    try module.imports.append(.{
-        .module = try runtime.allocator.dupe(u8, "wasi_snapshot_preview1"),
-        .name = try runtime.allocator.dupe(u8, "fd_seek"),
-        .kind = .function,
-        .type_index = @intCast(fd_seek_type_idx),
-    });
-
-    try module.imports.append(.{
-        .module = try runtime.allocator.dupe(u8, "wasi_snapshot_preview1"),
-        .name = try runtime.allocator.dupe(u8, "environ_sizes_get"),
-        .kind = .function,
-        .type_index = @intCast(two_i32_to_i32_type_idx),
-    });
-
-    try module.imports.append(.{
-        .module = try runtime.allocator.dupe(u8, "wasi_snapshot_preview1"),
-        .name = try runtime.allocator.dupe(u8, "environ_get"),
-        .kind = .function,
-        .type_index = @intCast(two_i32_to_i32_type_idx),
-    });
-
-    try module.imports.append(.{
-        .module = try runtime.allocator.dupe(u8, "wasi_snapshot_preview1"),
-        .name = try runtime.allocator.dupe(u8, "args_sizes_get"),
-        .kind = .function,
-        .type_index = @intCast(two_i32_to_i32_type_idx),
-    });
-
-    try module.imports.append(.{
-        .module = try runtime.allocator.dupe(u8, "wasi_snapshot_preview1"),
-        .name = try runtime.allocator.dupe(u8, "args_get"),
-        .kind = .function,
-        .type_index = @intCast(two_i32_to_i32_type_idx),
-    });
-
-    try module.imports.append(.{
-        .module = try runtime.allocator.dupe(u8, "wasi_snapshot_preview1"),
-        .name = try runtime.allocator.dupe(u8, "proc_exit"),
-        .kind = .function,
-        .type_index = @intCast(proc_exit_type_idx),
-    });
+    _ = runtime;
+    // Do not modify the module's type or import tables here; WASI imports are
+    // already declared in the module. This function is responsible for
+    // preparing memory (argv/environ) only.
 }
 
 /// Write data to stdout
@@ -134,12 +62,8 @@ pub fn fd_write(self: *WASI, fd: i32, iovs_ptr: i32, iovs_len: i32, written_ptr:
 
     if (module.memory) |memory| {
         var total_written: u32 = 0;
-        const stdout = std.io.getStdOut();
-        const stderr = std.io.getStdErr();
-
-        // Create buffered writers
-        var stdout_buffered = std.io.bufferedWriter(stdout.writer());
-        var stderr_buffered = std.io.bufferedWriter(stderr.writer());
+        const stdout_file = std.fs.File{ .handle = 1 };
+        const stderr_file = std.fs.File{ .handle = 2 };
 
         // Check if the iovs_ptr is valid
         if (iovs_ptr < 0 or @as(usize, @intCast(iovs_ptr)) + (@as(usize, @intCast(iovs_len)) * 8) > memory.len) {
@@ -196,20 +120,20 @@ pub fn fd_write(self: *WASI, fd: i32, iovs_ptr: i32, iovs_len: i32, written_ptr:
             }
 
             // Write to stdout/stderr
-            const writer = if (fd == 1) stdout_buffered.writer() else stderr_buffered.writer();
-            try writer.writeAll(buffer);
+            const file = if (fd == 1) stdout_file else stderr_file;
+            _ = try file.writeAll(buffer);
 
-            // Collect in buffer for testing or other purposes
-            try self.stdout_buffer.appendSlice(buffer);
+            // Collect in buffer only when debugging
+            if (self.debug) {
+                try self.stdout_buffer.appendSlice(self.allocator, buffer);
+            }
 
             total_written += buf_len;
         }
 
         // Flush the buffered writers
         if (fd == 1) {
-            try stdout_buffered.flush();
         } else {
-            try stderr_buffered.flush();
         }
 
         // Write the number of bytes written to written_ptr
