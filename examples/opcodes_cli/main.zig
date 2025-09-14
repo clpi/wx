@@ -122,18 +122,22 @@ fn cmd_select_like(it: *std.process.ArgIterator) !void {
 // Locals get/set/tee are naturally used throughout; demonstrate explicitly
 fn cmd_locals_demo(it: *std.process.ArgIterator) !void {
     _ = it; // no input
-    const x: i32 = 3;      // local.set
-    var y: i32 = x;        // local.get -> local.set
+    const x: i32 = 3; // local.set
+    var y: i32 = x; // local.get -> local.set
     const z: i32 = blk: { // tee modeled by assigning and using value
-        y += 5;           // local.get + add + local.set
-        break :blk y;     // local.get
+        y += 5; // local.get + add + local.set
+        break :blk y; // local.get
     };
     try write({}, "{d}\n", .{x + y + z});
 }
 
 // Simple table-like indirect call by manual dispatch (not guaranteed to lower to call_indirect)
-fn fn_add(a: i32, b: i32) i32 { return a + b; }
-fn fn_sub(a: i32, b: i32) i32 { return a - b; }
+fn fn_add(a: i32, b: i32) i32 {
+    return a + b;
+}
+fn fn_sub(a: i32, b: i32) i32 {
+    return a - b;
+}
 
 fn cmd_dispatch(it: *std.process.ArgIterator) !void {
     const which = it.next() orelse return error.MissingArgument;

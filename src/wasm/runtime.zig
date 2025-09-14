@@ -814,7 +814,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const val = self.stack.pop();
                     if (@as(ValueType, std.meta.activeTag(val.?)) != .i32) return Error.TypeMismatch;
                     try self.stack.append(self.allocator, .{ .f32 = @as(f32, @floatFromInt(val.?.i32)) });
-                    
+
                     var o = Log.op("f32", "convert_i32_s");
                     o.log("convert_i32_s({d}) = {d}", .{ val.?.i32, @as(f32, @floatFromInt(val.?.i32)) });
                 },
@@ -823,7 +823,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const val = self.stack.pop();
                     if (@as(ValueType, std.meta.activeTag(val.?)) != .i64) return Error.TypeMismatch;
                     try self.stack.append(self.allocator, .{ .f32 = @as(f32, @floatFromInt(val.?.i64)) });
-                    
+
                     var o = Log.op("f32", "convert_i64_s");
                     o.log("convert_i64_s({d}) = {d}", .{ val.?.i64, @as(f32, @floatFromInt(val.?.i64)) });
                 },
@@ -833,7 +833,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (@as(ValueType, std.meta.activeTag(val.?)) != .i64) return Error.TypeMismatch;
                     const uval = @as(u64, @bitCast(val.?.i64));
                     try self.stack.append(self.allocator, .{ .f32 = @as(f32, @floatFromInt(uval)) });
-                    
+
                     var o = Log.op("f32", "convert_i64_u");
                     o.log("convert_i64_u({d}) = {d}", .{ uval, @as(f32, @floatFromInt(uval)) });
                 },
@@ -842,7 +842,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const val = self.stack.pop();
                     if (@as(ValueType, std.meta.activeTag(val.?)) != .f64) return Error.TypeMismatch;
                     try self.stack.append(self.allocator, .{ .f32 = @as(f32, @floatCast(val.?.f64)) });
-                    
+
                     var o = Log.op("f32", "demote_f64");
                     o.log("demote_f64({d}) = {d}", .{ val.?.f64, @as(f32, @floatCast(val.?.f64)) });
                 },
@@ -851,14 +851,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.f32 == b.?.f32) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("f32", "eq");
                     o.log("{d} == {d} -> {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -866,14 +866,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.f32 != b.?.f32) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("f32", "ne");
                     o.log("{d} != {d} -> {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -881,14 +881,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.f32 < b.?.f32) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("f32", "lt");
                     o.log("{d} < {d} -> {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -896,14 +896,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.f32 > b.?.f32) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("f32", "gt");
                     o.log("{d} > {d} -> {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -911,14 +911,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.f32 <= b.?.f32) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("f32", "le");
                     o.log("{d} <= {d} -> {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -926,14 +926,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.f32 >= b.?.f32) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("f32", "ge");
                     o.log("{d} >= {d} -> {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -941,91 +941,91 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                 .abs => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = @abs(a.?.f32);
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "abs");
                     o.log("abs({d}) = {d}", .{ a.?.f32, result });
                 },
                 .neg => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = -a.?.f32;
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "neg");
                     o.log("neg({d}) = {d}", .{ a.?.f32, result });
                 },
                 .ceil => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = @ceil(a.?.f32);
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "ceil");
                     o.log("ceil({d}) = {d}", .{ a.?.f32, result });
                 },
                 .floor => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = @floor(a.?.f32);
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "floor");
                     o.log("floor({d}) = {d}", .{ a.?.f32, result });
                 },
                 .trunc => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = @trunc(a.?.f32);
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "trunc");
                     o.log("trunc({d}) = {d}", .{ a.?.f32, result });
                 },
                 .nearest => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = @round(a.?.f32);
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "nearest");
                     o.log("nearest({d}) = {d}", .{ a.?.f32, result });
                 },
                 .sqrt => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = @sqrt(a.?.f32);
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "sqrt");
                     o.log("sqrt({d}) = {d}", .{ a.?.f32, result });
                 },
@@ -1033,14 +1033,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = a.?.f32 + b.?.f32;
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "add");
                     o.log("{d} + {d} = {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -1048,14 +1048,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = a.?.f32 - b.?.f32;
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "sub");
                     o.log("{d} - {d} = {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -1063,14 +1063,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = a.?.f32 * b.?.f32;
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "mul");
                     o.log("{d} * {d} = {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -1078,14 +1078,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = a.?.f32 / b.?.f32;
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "div");
                     o.log("{d} / {d} = {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -1093,14 +1093,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = @min(a.?.f32, b.?.f32);
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "min");
                     o.log("min({d}, {d}) = {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -1108,14 +1108,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = @max(a.?.f32, b.?.f32);
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "max");
                     o.log("max({d}, {d}) = {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -1123,14 +1123,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     const result = std.math.copysign(a.?.f32, b.?.f32);
                     try self.stack.append(self.allocator, .{ .f32 = result });
-                    
+
                     var o = Log.op("f32", "copysign");
                     o.log("copysign({d}, {d}) = {d}", .{ a.?.f32, b.?.f32, result });
                 },
@@ -3044,42 +3044,42 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                 .clz => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i32)
                         return Error.TypeMismatch;
-                    
+
                     const val = @as(u32, @bitCast(a.?.i32));
                     const result: i32 = @intCast(@clz(val));
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i32", "clz");
                     o.log("clz({d}) = {d}", .{ val, result });
                 },
                 .ctz => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i32)
                         return Error.TypeMismatch;
-                    
+
                     const val = @as(u32, @bitCast(a.?.i32));
                     const result: i32 = @intCast(@ctz(val));
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i32", "ctz");
                     o.log("ctz({d}) = {d}", .{ val, result });
                 },
                 .popcnt => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i32)
                         return Error.TypeMismatch;
-                    
+
                     const val = @as(u32, @bitCast(a.?.i32));
                     const result: i32 = @intCast(@popCount(val));
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i32", "popcnt");
                     o.log("popcnt({d}) = {d}", .{ val, result });
                 },
@@ -3125,116 +3125,118 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     const ea = try effAddr(addr.?.i32, offset);
                     try self.writeLittle(u16, ea, @as(u16, @truncate(@as(u32, @bitCast(v.?.i32)))));
                 },
-                // Type conversion operations  
+                // Type conversion operations
                 .wrap_i64 => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = @truncate(a.?.i64);
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i32", "wrap_i64");
                     o.log("wrap_i64({d}) = {d}", .{ a.?.i64, result });
                 },
                 .trunc_f32_s => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     // Check for NaN and infinity
                     if (std.math.isNan(a.?.f32) or std.math.isInf(a.?.f32)) {
                         return Error.InvalidAccess;
                     }
-                    
+
                     // Check for values outside i32 range
-                    if (a.?.f32 >= @as(f32, @floatFromInt(std.math.maxInt(i32))) + 1 or 
-                        a.?.f32 < @as(f32, @floatFromInt(std.math.minInt(i32)))) {
+                    if (a.?.f32 >= @as(f32, @floatFromInt(std.math.maxInt(i32))) + 1 or
+                        a.?.f32 < @as(f32, @floatFromInt(std.math.minInt(i32))))
+                    {
                         return Error.InvalidAccess;
                     }
-                    
+
                     const result: i32 = @intFromFloat(a.?.f32);
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i32", "trunc_f32_s");
                     o.log("trunc_f32_s({d}) = {d}", .{ a.?.f32, result });
                 },
                 .trunc_f32_u => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f32)
                         return Error.TypeMismatch;
-                    
+
                     // Check for NaN and infinity
                     if (std.math.isNan(a.?.f32) or std.math.isInf(a.?.f32)) {
                         return Error.InvalidAccess;
                     }
-                    
+
                     // Check for negative values or values outside u32 range
                     if (a.?.f32 < 0 or a.?.f32 >= @as(f32, @floatFromInt(std.math.maxInt(u32))) + 1) {
                         return Error.InvalidAccess;
                     }
-                    
+
                     const result: u32 = @intFromFloat(a.?.f32);
                     try self.stack.append(self.allocator, .{ .i32 = @bitCast(result) });
-                    
+
                     var o = Log.op("i32", "trunc_f32_u");
                     o.log("trunc_f32_u({d}) = {d}", .{ a.?.f32, result });
                 },
                 .trunc_f64_s => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f64)
                         return Error.TypeMismatch;
-                    
+
                     // Check for NaN and infinity
                     if (std.math.isNan(a.?.f64) or std.math.isInf(a.?.f64)) {
                         return Error.InvalidAccess;
                     }
-                    
+
                     // Check for values outside i32 range
-                    if (a.?.f64 >= @as(f64, @floatFromInt(std.math.maxInt(i32))) + 1 or 
-                        a.?.f64 < @as(f64, @floatFromInt(std.math.minInt(i32)))) {
+                    if (a.?.f64 >= @as(f64, @floatFromInt(std.math.maxInt(i32))) + 1 or
+                        a.?.f64 < @as(f64, @floatFromInt(std.math.minInt(i32))))
+                    {
                         return Error.InvalidAccess;
                     }
-                    
+
                     const result: i32 = @intFromFloat(a.?.f64);
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i32", "trunc_f64_s");
                     o.log("trunc_f64_s({d}) = {d}", .{ a.?.f64, result });
                 },
                 .trunc_f64_u => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .f64)
                         return Error.TypeMismatch;
-                    
+
                     // Check for NaN and infinity
                     if (std.math.isNan(a.?.f64) or std.math.isInf(a.?.f64)) {
                         return Error.InvalidAccess;
                     }
-                    
+
                     // Check for negative values or values outside u32 range
                     if (a.?.f64 < 0 or a.?.f64 >= @as(f64, @floatFromInt(std.math.maxInt(u32))) + 1) {
                         return Error.InvalidAccess;
                     }
-                    
+
                     const result: u32 = @intFromFloat(a.?.f64);
                     try self.stack.append(self.allocator, .{ .i32 = @bitCast(result) });
-                    
+
                     var o = Log.op("i32", "trunc_f64_u");
                     o.log("trunc_f64_u({d}) = {d}", .{ a.?.f64, result });
                 },
                 .load => {
-    _ = try code_reader.readLEB128(); // flags (alignment), currently unused
+                    _ = try code_reader.readLEB128(); // flags (alignment), currently unused
                     const offset = try code_reader.readLEB128();
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const addr_val = self.stack.pop();
@@ -3339,14 +3341,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result = a.?.i64 +% b.?.i64;
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "add");
                     o.log("{d} + {d} = {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3354,14 +3356,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result = a.?.i64 -% b.?.i64;
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "sub");
                     o.log("{d} - {d} = {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3369,14 +3371,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result = a.?.i64 *% b.?.i64;
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "mul");
                     o.log("{d} * {d} = {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3384,20 +3386,20 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     if (b.?.i64 == 0) return Error.DivideByZero;
-                    
+
                     if (a.?.i64 == std.math.minInt(i64) and b.?.i64 == -1) {
                         return Error.InvalidAccess;
                     }
-                    
+
                     const result = @divTrunc(a.?.i64, b.?.i64);
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "div_s");
                     o.log("{d} / {d} = {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3405,18 +3407,18 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     if (b.?.i64 == 0) return Error.DivideByZero;
-                    
+
                     const ua = @as(u64, @bitCast(a.?.i64));
                     const ub = @as(u64, @bitCast(b.?.i64));
                     const result = @as(i64, @bitCast(@divTrunc(ua, ub)));
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "div_u");
                     o.log("{d} (unsigned) / {d} (unsigned) = {d}", .{ ua, ub, result });
                 },
@@ -3424,16 +3426,16 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     if (b.?.i64 == 0) return Error.DivideByZero;
-                    
+
                     const result = @rem(a.?.i64, b.?.i64);
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "rem_s");
                     o.log("{d} % {d} = {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3441,18 +3443,18 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     if (b.?.i64 == 0) return Error.DivideByZero;
-                    
+
                     const ua = @as(u64, @bitCast(a.?.i64));
                     const ub = @as(u64, @bitCast(b.?.i64));
                     const result = @as(i64, @bitCast(@rem(ua, ub)));
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "rem_u");
                     o.log("{d} (unsigned) % {d} (unsigned) = {d}", .{ ua, ub, result });
                 },
@@ -3461,14 +3463,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result = a.?.i64 & b.?.i64;
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "and");
                     o.log("{d} & {d} = {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3476,14 +3478,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result = a.?.i64 | b.?.i64;
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "or");
                     o.log("{d} | {d} = {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3491,14 +3493,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result = a.?.i64 ^ b.?.i64;
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "xor");
                     o.log("{d} ^ {d} = {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3506,15 +3508,15 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const shift = @as(u6, @truncate(@as(u64, @bitCast(b.?.i64)) % 64));
                     const result = a.?.i64 << shift;
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "shl");
                     o.log("{d} << {d} = {d}", .{ a.?.i64, shift, result });
                 },
@@ -3522,15 +3524,15 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const shift = @as(u6, @truncate(@as(u64, @bitCast(b.?.i64)) % 64));
                     const result = a.?.i64 >> shift;
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "shr_s");
                     o.log("{d} >> {d} = {d}", .{ a.?.i64, shift, result });
                 },
@@ -3538,16 +3540,16 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const ua = @as(u64, @bitCast(a.?.i64));
                     const shift = @as(u6, @truncate(@as(u64, @bitCast(b.?.i64)) % 64));
                     const result = @as(i64, @bitCast(ua >> shift));
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "shr_u");
                     o.log("{d} (unsigned) >> {d} = {d}", .{ ua, shift, result });
                 },
@@ -3555,16 +3557,16 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const ua = @as(u64, @bitCast(a.?.i64));
                     const rotate = @as(u6, @truncate(@as(u64, @bitCast(b.?.i64)) % 64));
                     const result = std.math.rotl(u64, ua, rotate);
                     try self.stack.append(self.allocator, .{ .i64 = @bitCast(result) });
-                    
+
                     var o = Log.op("i64", "rotl");
                     o.log("rotl({d}, {d}) = {d}", .{ ua, rotate, result });
                 },
@@ -3572,16 +3574,16 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const ua = @as(u64, @bitCast(a.?.i64));
                     const rotate = @as(u6, @truncate(@as(u64, @bitCast(b.?.i64)) % 64));
                     const result = std.math.rotr(u64, ua, rotate);
                     try self.stack.append(self.allocator, .{ .i64 = @bitCast(result) });
-                    
+
                     var o = Log.op("i64", "rotr");
                     o.log("rotr({d}, {d}) = {d}", .{ ua, rotate, result });
                 },
@@ -3589,56 +3591,56 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                 .clz => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const val = @as(u64, @bitCast(a.?.i64));
                     const result: i64 = @intCast(@clz(val));
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "clz");
                     o.log("clz({d}) = {d}", .{ val, result });
                 },
                 .ctz => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const val = @as(u64, @bitCast(a.?.i64));
                     const result: i64 = @intCast(@ctz(val));
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "ctz");
                     o.log("ctz({d}) = {d}", .{ val, result });
                 },
                 .popcnt => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const val = @as(u64, @bitCast(a.?.i64));
                     const result: i64 = @intCast(@popCount(val));
                     try self.stack.append(self.allocator, .{ .i64 = result });
-                    
+
                     var o = Log.op("i64", "popcnt");
                     o.log("popcnt({d}) = {d}", .{ val, result });
                 },
-                // Comparison operations  
+                // Comparison operations
                 .eqz => {
                     if (self.stack.items.len < 1) return Error.StackUnderflow;
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.i64 == 0) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "eqz");
                     o.log("{d} == 0 -> {d}", .{ a.?.i64, result });
                 },
@@ -3646,14 +3648,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.i64 == b.?.i64) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "eq");
                     o.log("{d} == {d} -> {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3661,14 +3663,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.i64 != b.?.i64) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "ne");
                     o.log("{d} != {d} -> {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3676,14 +3678,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.i64 < b.?.i64) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "lt_s");
                     o.log("{d} < {d} -> {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3691,16 +3693,16 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const ua = @as(u64, @bitCast(a.?.i64));
                     const ub = @as(u64, @bitCast(b.?.i64));
                     const result: i32 = if (ua < ub) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "lt_u");
                     o.log("{d} (unsigned) < {d} (unsigned) -> {d}", .{ ua, ub, result });
                 },
@@ -3708,14 +3710,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.i64 > b.?.i64) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "gt_s");
                     o.log("{d} > {d} -> {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3723,16 +3725,16 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const ua = @as(u64, @bitCast(a.?.i64));
                     const ub = @as(u64, @bitCast(b.?.i64));
                     const result: i32 = if (ua > ub) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "gt_u");
                     o.log("{d} (unsigned) > {d} (unsigned) -> {d}", .{ ua, ub, result });
                 },
@@ -3740,14 +3742,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.i64 <= b.?.i64) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "le_s");
                     o.log("{d} <= {d} -> {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3755,16 +3757,16 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const ua = @as(u64, @bitCast(a.?.i64));
                     const ub = @as(u64, @bitCast(b.?.i64));
                     const result: i32 = if (ua <= ub) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "le_u");
                     o.log("{d} (unsigned) <= {d} (unsigned) -> {d}", .{ ua, ub, result });
                 },
@@ -3772,14 +3774,14 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const result: i32 = if (a.?.i64 >= b.?.i64) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "ge_s");
                     o.log("{d} >= {d} -> {d}", .{ a.?.i64, b.?.i64, result });
                 },
@@ -3787,16 +3789,16 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     if (self.stack.items.len < 2) return Error.StackUnderflow;
                     const b = self.stack.pop();
                     const a = self.stack.pop();
-                    
+
                     if (@as(ValueType, std.meta.activeTag(a.?)) != .i64 or
                         @as(ValueType, std.meta.activeTag(b.?)) != .i64)
                         return Error.TypeMismatch;
-                    
+
                     const ua = @as(u64, @bitCast(a.?.i64));
                     const ub = @as(u64, @bitCast(b.?.i64));
                     const result: i32 = if (ua >= ub) 1 else 0;
                     try self.stack.append(self.allocator, .{ .i32 = result });
-                    
+
                     var o = Log.op("i64", "ge_u");
                     o.log("{d} (unsigned) >= {d} (unsigned) -> {d}", .{ ua, ub, result });
                 },
@@ -3960,8 +3962,13 @@ fn findElseOrEnd(_: *Runtime, func: *const Function, _: *BytecodeReader, start_p
                     _ = try r.readLEB128();
                 }
             },
-            0x05 => { if (depth == 1) return ElseEnd{ .else_pos = r.pos - 1, .end_pos = undefined }; },
-            0x0B => { depth -= 1; if (depth == 0) return ElseEnd{ .else_pos = null, .end_pos = r.pos - 1 }; },
+            0x05 => {
+                if (depth == 1) return ElseEnd{ .else_pos = r.pos - 1, .end_pos = undefined };
+            },
+            0x0B => {
+                depth -= 1;
+                if (depth == 0) return ElseEnd{ .else_pos = null, .end_pos = r.pos - 1 };
+            },
             else => try skipInstruction(&r),
         }
     }
@@ -3972,22 +3979,36 @@ fn skipInstruction(reader: *BytecodeReader) !void {
     const op = try reader.readByte();
     switch (op) {
         // local/global get/set/tee
-        0x20, 0x21, 0x22, 0x23, 0x24 => { _ = try reader.readLEB128(); },
+        0x20, 0x21, 0x22, 0x23, 0x24 => {
+            _ = try reader.readLEB128();
+        },
         // memory loads/stores (align, offset)
         0x28, 0x29, 0x2A, 0x2B, 0x36, 0x37, 0x38, 0x39 => {
             _ = try reader.readLEB128();
             _ = try reader.readLEB128();
         },
         // i32.const / i64.const
-        0x41 => { _ = try reader.readSLEB32(); },
-        0x42 => { _ = try reader.readSLEB64(); },
+        0x41 => {
+            _ = try reader.readSLEB32();
+        },
+        0x42 => {
+            _ = try reader.readSLEB64();
+        },
         // f32.const / f64.const
-        0x43 => { _ = try reader.readBytes(4); },
-        0x44 => { _ = try reader.readBytes(8); },
+        0x43 => {
+            _ = try reader.readBytes(4);
+        },
+        0x44 => {
+            _ = try reader.readBytes(8);
+        },
         // call
-        0x10 => { _ = try reader.readLEB128(); },
+        0x10 => {
+            _ = try reader.readLEB128();
+        },
         // br / br_if
-        0x0C, 0x0D => { _ = try reader.readLEB128(); },
+        0x0C, 0x0D => {
+            _ = try reader.readLEB128();
+        },
         else => {},
     }
 }

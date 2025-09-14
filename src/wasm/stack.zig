@@ -64,10 +64,10 @@ pub fn SmallVec(comptime T: type, comptime INLINE: usize) type {
             }
             if (self.using_heap) {
                 self.heap_buf[self.items.len] = v;
-                self.items = self.heap_buf[0..self.items.len + 1];
+                self.items = self.heap_buf[0 .. self.items.len + 1];
             } else {
                 self.inline_buf[self.items.len] = v;
-                self.items = self.inline_buf[0..self.items.len + 1];
+                self.items = self.inline_buf[0 .. self.items.len + 1];
             }
         }
 

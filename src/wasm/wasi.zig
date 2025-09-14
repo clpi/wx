@@ -132,9 +132,7 @@ pub fn fd_write(self: *WASI, fd: i32, iovs_ptr: i32, iovs_len: i32, written_ptr:
         }
 
         // Flush the buffered writers
-        if (fd == 1) {
-        } else {
-        }
+        if (fd == 1) {} else {}
 
         // Write the number of bytes written to written_ptr
         if (written_ptr >= 0 and @as(usize, @intCast(written_ptr)) + 4 <= memory.len) {

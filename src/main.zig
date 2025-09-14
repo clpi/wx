@@ -10,16 +10,16 @@ const config = @import("cmd/config.zig");
 fn printHelp(program_name: []const u8) void {
     print("wx - WebAssembly Runtime\n", .{}, Color.cyan);
     print("Usage: {s} [OPTIONS] <wasm_file> [args...]\n\n", .{program_name}, Color.white);
-    
+
     print("Arguments:\n", .{}, Color.yellow);
     print("  <wasm_file>     WebAssembly (.wasm) file to execute\n", .{}, Color.white);
     print("  [args...]       Arguments to pass to the WASM program\n\n", .{}, Color.white);
-    
+
     print("Options:\n", .{}, Color.yellow);
     print("  -h, --help      Show this help message\n", .{}, Color.white);
     print("  -d, --debug     Enable debug output\n", .{}, Color.white);
     print("  -v, --version   Show version information\n\n", .{}, Color.white);
-    
+
     print("Examples:\n", .{}, Color.yellow);
     print("  {s} examples/hello.wasm\n", .{program_name}, Color.white);
     print("  {s} --debug examples/math.wasm\n", .{program_name}, Color.white);
@@ -38,7 +38,7 @@ pub fn main() !void {
     // Get command line arguments
     var as = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, as);
-    
+
     // Handle case where no arguments are provided
     if (as.len < 2) {
         printHelp(as[0]);
@@ -80,7 +80,7 @@ pub fn main() !void {
                 return;
             },
             error.AccessDenied => {
-                print("Error: Permission denied reading '{s}'\n", .{wpath.?}, Color.red);  
+                print("Error: Permission denied reading '{s}'\n", .{wpath.?}, Color.red);
                 return;
             },
             else => return err,
