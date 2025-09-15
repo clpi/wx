@@ -492,25 +492,8 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
             oe.log("\n", .{});
         }
 
-        // Special handling for type marker opcodes and other block result types
-        // These are WebAssembly type markers that should only appear as parameters
-        // to control instructions, but they might be encountered directly
-        if (opcode == 0x7F or opcode == 0x7E or opcode == 0x7D or
-            opcode == 0x7C or opcode == 0x70 or opcode == 0x40)
-        {
-            const type_name = switch (opcode) {
-                0x7F => "i32",
-                0x7E => "i64",
-                0x7D => "f32",
-                0x7C => "f64",
-                0x70 => "funcref",
-                0x40 => "void",
-                else => unreachable,
-            };
-            var o = Log.op("type_marker", type_name);
-            o.log("Treating type marker (0x{X:0>2}) as a no-op", .{opcode});
-            continue;
-        }
+        // Do not treat type marker bytes (e.g. 0x40, 0x7F..0x7C) as standalone opcodes.
+        // They are immediates to control instructions and will be consumed in-context.
 
         const op_match = Op.match(opcode) orelse {
             std.debug.print("Unknown opcode 0x{X:0>2} at pos {d}\n", .{ opcode, code_reader.pos - 1 });
@@ -1308,7 +1291,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     } else {
                         o.log("  Condition is true, executing if block", .{});
                         // Ensure the if block end can be located later when we meet else or end
-                        _ = try self.findMatchingEnd(func, &code_reader, if_pos, .@"if");
+                        _ = try self.findMatchingEnd(func, &code_reader, code_reader.pos, .@"if");
                     }
                 },
                 .@"else" => {
@@ -1332,7 +1315,7 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                                 }
                             },
                             0x0B => depth -= 1,
-                            else => try skipInstruction(&tmp),
+                            else => try skipInstructionImmediates(&tmp, op),
                         }
                     }
                     // Jump to just after the matching end
@@ -4213,7 +4196,7 @@ fn findMatchingEnd(_: *Runtime, func: *const Function, _: *BytecodeReader, start
                 depth -= 1;
                 if (depth == 0) return r.pos - 1;
             },
-            else => try skipInstruction(&r),
+            else => try skipInstructionImmediates(&r, op),
         }
     }
     return null;
@@ -4242,7 +4225,7 @@ fn findElseOrEnd(_: *Runtime, func: *const Function, _: *BytecodeReader, start_p
                 depth -= 1;
                 if (depth == 0) return ElseEnd{ .else_pos = null, .end_pos = r.pos - 1 };
             },
-            else => try skipInstruction(&r),
+            else => try skipInstructionImmediates(&r, op),
         }
     }
     return null;
@@ -4283,46 +4266,90 @@ fn findCatchOrEnd(_: *Runtime, func: *const Function, _: *BytecodeReader, start_
                 }
                 depth += 1;
             },
-            else => try skipInstruction(&r),
+            else => try skipInstructionImmediates(&r, op),
         }
     }
     return null;
 }
-// Skip immediates for a single non-control instruction
-fn skipInstruction(reader: *BytecodeReader) !void {
-    const op = try reader.readByte();
+// Skip immediates for an opcode that has already been read
+fn skipInstructionImmediates(reader: *BytecodeReader, op: u8) !void {
     switch (op) {
+        // control flow instructions with blocktype
+        0x02, 0x03, 0x04 => {
+            const bt = try reader.readByte();
+            if (bt != 0x40 and bt != 0x7F and bt != 0x7E and bt != 0x7D and bt != 0x7C) {
+                _ = try reader.readLEB128();
+            }
+        },
         // local/global get/set/tee
         0x20, 0x21, 0x22, 0x23, 0x24 => {
             _ = try reader.readLEB128();
         },
-        // memory loads/stores (align, offset)
-        0x28, 0x29, 0x2A, 0x2B, 0x36, 0x37, 0x38, 0x39 => {
-            _ = try reader.readLEB128();
-            _ = try reader.readLEB128();
+        // memory loads (align, offset)
+        0x28...0x35 => {
+            _ = try reader.readLEB128(); // align
+            _ = try reader.readLEB128(); // offset
+        },
+        // memory stores (align, offset)
+        0x36...0x3E => {
+            _ = try reader.readLEB128(); // align
+            _ = try reader.readLEB128(); // offset
+        },
+        // memory.size/memory.grow have a reserved immediate byte in MVP
+        0x3F, 0x40 => {
+            _ = try reader.readByte();
         },
         // i32.const / i64.const
-        0x41 => {
-            _ = try reader.readSLEB32();
-        },
-        0x42 => {
-            _ = try reader.readSLEB64();
-        },
+        0x41 => { _ = try reader.readSLEB32(); },
+        0x42 => { _ = try reader.readSLEB64(); },
         // f32.const / f64.const
-        0x43 => {
-            _ = try reader.readBytes(4);
-        },
-        0x44 => {
-            _ = try reader.readBytes(8);
-        },
-        // call
-        0x10 => {
-            _ = try reader.readLEB128();
-        },
+        0x43 => { _ = try reader.readBytes(4); },
+        0x44 => { _ = try reader.readBytes(8); },
+        // call / call_indirect
+        0x10 => { _ = try reader.readLEB128(); },
+        0x11 => { _ = try reader.readLEB128(); _ = try reader.readLEB128(); },
         // br / br_if
-        0x0C, 0x0D => {
-            _ = try reader.readLEB128();
+        0x0C, 0x0D => { _ = try reader.readLEB128(); },
+        // br_table: vector of labels then default
+        0x0E => {
+            const n = try reader.readLEB128();
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                _ = try reader.readLEB128();
+            }
+            _ = try reader.readLEB128(); // default
+        },
+        // select_t: vector of types
+        0x1C => {
+            const vlen = try reader.readLEB128();
+            var i: usize = 0;
+            while (i < vlen) : (i += 1) {
+                _ = try reader.readByte();
+            }
+        },
+        // ref.null heaptype
+        0xD0 => { _ = try reader.readByte(); },
+        // extended prefix 0xFC: read subopcode and immediates conservatively
+        0xFC => {
+            const sub = try reader.readLEB128();
+            switch (sub) {
+                0x08 => { _ = try reader.readLEB128(); _ = try reader.readLEB128(); }, // memory.init d, m
+                0x09 => { _ = try reader.readLEB128(); }, // data.drop d
+                0x0A => { _ = try reader.readLEB128(); _ = try reader.readLEB128(); }, // memory.copy m, m
+                0x0B => { _ = try reader.readLEB128(); }, // memory.fill m
+                0x0C => { _ = try reader.readLEB128(); _ = try reader.readLEB128(); }, // table.init e, t
+                0x0D => { _ = try reader.readLEB128(); }, // elem.drop e
+                0x0E => { _ = try reader.readLEB128(); _ = try reader.readLEB128(); }, // table.copy t, t
+                0x0F, 0x10, 0x11 => { _ = try reader.readLEB128(); }, // table.grow/size/fill have table idx
+                else => {},
+            }
         },
         else => {},
     }
+}
+
+// Skip immediates for a single instruction (reads opcode first)
+fn skipInstruction(reader: *BytecodeReader) !void {
+    const op = try reader.readByte();
+    try skipInstructionImmediates(reader, op);
 }
