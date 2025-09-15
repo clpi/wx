@@ -2,3 +2,11 @@
 .cursorrules
 .zig-out
 .zig-cache
+.zig-cache-global
+.claude/
+.cursor/
+.gemini/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.github/copilot-instructions.md

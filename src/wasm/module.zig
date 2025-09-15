@@ -44,6 +44,12 @@ imports: std.ArrayList(Import),
 exports: std.ArrayList(Export),
 start_function_index: ?u32,
 cfg: std.ArrayList(FunctionCFG),
+    // Passive bulk-memory storage (for memory.init/data.drop)
+    passive_data_segments: std.ArrayList([]u8) = undefined,
+    passive_data_dropped: std.ArrayList(bool) = undefined,
+    // Passive element segments (for table.init/elem.drop)
+    passive_elem_segments: std.ArrayList([]usize) = undefined,
+    passive_elem_dropped: std.ArrayList(bool) = undefined,
 
 pub fn init(allocator: std.mem.Allocator) !*Module {
     const module = try allocator.create(Module);
@@ -58,6 +64,10 @@ pub fn init(allocator: std.mem.Allocator) !*Module {
         .exports = try std.ArrayList(Export).initCapacity(allocator, 0),
         .start_function_index = null,
         .cfg = try std.ArrayList(FunctionCFG).initCapacity(allocator, 0),
+        .passive_data_segments = try std.ArrayList([]u8).initCapacity(allocator, 0),
+        .passive_data_dropped = try std.ArrayList(bool).initCapacity(allocator, 0),
+        .passive_elem_segments = try std.ArrayList([]usize).initCapacity(allocator, 0),
+        .passive_elem_dropped = try std.ArrayList(bool).initCapacity(allocator, 0),
     };
     return module;
 }
@@ -473,65 +483,73 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
 
                 var i: usize = 0;
                 while (i < count) : (i += 1) {
-                    // Read table index (must be 0 in WASM 1.0)
-                    const table_idx = try elem_reader.readLEB128();
-                    if (table_idx != 0) return error.InvalidTableIndex;
+                    const flags = try elem_reader.readLEB128();
+                    switch (flags) {
+                        0 => {
+                            // Active element segment targeting table 0 with offset expr
+                            const offset_opcode = try elem_reader.readByte();
+                            if (offset_opcode != 0x41) return error.InvalidOffsetExpression; // i32.const
+                            const offset = try elem_reader.readLEB128();
+                            const end_opcode = try elem_reader.readByte();
+                            if (end_opcode != 0x0b) return error.InvalidModule;
+                            const num_elems = try elem_reader.readLEB128();
 
-                    // Read offset expression (must be a constant)
-                    const offset_opcode = try elem_reader.readByte();
-                    var offset: u32 = 0;
-
-                    switch (offset_opcode) {
-                        0x41 => { // i32.const
-                            offset = try elem_reader.readLEB128();
+                            if (module.table == null) {
+                                o.log("  Error: No table initialized for element segment", .{});
+                                return error.InvalidModule;
+                            }
+                            if (offset + num_elems > module.table.?.items.len) {
+                                try module.table.?.resize(allocator, offset + num_elems);
+                                for (module.table.?.items[module.table.?.items.len - num_elems ..]) |*item| item.* = .{ .funcref = null };
+                            }
+                            var j: usize = 0;
+                            while (j < num_elems) : (j += 1) {
+                                const func_idx = try elem_reader.readLEB128();
+                                module.table.?.items[offset + j] = .{ .funcref = func_idx };
+                            }
+                            o.log("  Initialized active element seg at offset {d} count {d}", .{ offset, num_elems });
                         },
-                        else => return error.InvalidOffsetExpression,
-                    }
-
-                    // Skip end opcode
-                    const end_opcode = try elem_reader.readByte();
-                    if (end_opcode != 0x0b) return error.InvalidModule;
-
-                    // Read function indices
-                    const num_elems = try elem_reader.readLEB128();
-                    o.log("  Element segment {d}: table={d}, offset={d}, count={d}", .{
-                        i, table_idx, offset, num_elems,
-                    });
-
-                    // Make sure table exists
-                    if (module.table == null) {
-                        o.log("  Error: No table initialized for element segment", .{});
-                        return error.InvalidModule;
-                    }
-
-                    // Ensure table is large enough
-                    if (offset + num_elems > module.table.?.items.len) {
-                        o.log("  Warning: Element segment extends beyond table size. Growing table from {d} to {d}", .{ module.table.?.items.len, offset + num_elems });
-                        try module.table.?.resize(allocator, offset + num_elems);
-                        for (module.table.?.items[module.table.?.items.len - num_elems ..]) |*item| {
-                            item.* = .{ .funcref = null };
-                        }
-                    }
-
-                    // Read function indices and initialize table
-                    var j: usize = 0;
-                    while (j < num_elems) : (j += 1) {
-                        const func_idx = try elem_reader.readLEB128();
-                        o.log("    Element {d}: function {d}", .{ j, func_idx });
-
-                        if (module.table == null) {
-                            o.log("    Error: Table is null", .{});
-                            return error.InvalidAccess;
-                        }
-
-                        if (offset + j >= module.table.?.items.len) {
-                            o.log("    Error: Element index {d} out of bounds (table size: {d})", .{ offset + j, module.table.?.items.len });
-                            return error.InvalidAccess;
-                        }
-
-                        // Store function reference in table with actual function index
-                        module.table.?.items[offset + j] = .{ .funcref = func_idx };
-                        o.log("    Set table[{d}] = function {d}", .{ offset + j, func_idx });
+                        1, 3 => {
+                            // Passive or declarative: store indices for table.init
+                            const elemkind_or_type = try elem_reader.readByte();
+                            _ = elemkind_or_type; // expect funcref
+                            const n = try elem_reader.readLEB128();
+                            const list = try allocator.alloc(usize, n);
+                            for (list, 0..) |*slot, k| {
+                                _ = k;
+                                slot.* = try elem_reader.readLEB128();
+                            }
+                            try module.passive_elem_segments.append(allocator, list);
+                            try module.passive_elem_dropped.append(allocator, false);
+                            o.log("  Stored passive element seg {d} with {d} funcs", .{ i, n });
+                        },
+                        2 => {
+                            // Active with explicit table index
+                            const table_idx = try elem_reader.readLEB128();
+                            if (table_idx != 0) return error.InvalidTableIndex;
+                            const offset_opcode = try elem_reader.readByte();
+                            if (offset_opcode != 0x41) return error.InvalidOffsetExpression;
+                            const offset = try elem_reader.readLEB128();
+                            const end_opcode = try elem_reader.readByte();
+                            if (end_opcode != 0x0b) return error.InvalidModule;
+                            const elemkind_or_type = try elem_reader.readByte();
+                            _ = elemkind_or_type;
+                            const num_elems = try elem_reader.readLEB128();
+                            if (module.table == null) {
+                                return error.InvalidModule;
+                            }
+                            if (offset + num_elems > module.table.?.items.len) {
+                                try module.table.?.resize(allocator, offset + num_elems);
+                                for (module.table.?.items[module.table.?.items.len - num_elems ..]) |*item| item.* = .{ .funcref = null };
+                            }
+                            var j: usize = 0;
+                            while (j < num_elems) : (j += 1) {
+                                const func_idx = try elem_reader.readLEB128();
+                                module.table.?.items[offset + j] = .{ .funcref = func_idx };
+                            }
+                            o.log("  Initialized active(element) segment at offset {d} count {d}", .{ offset, num_elems });
+                        },
+                        else => return error.InvalidModule,
                     }
                 }
 
@@ -624,77 +642,69 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
 
                 var i: usize = 0;
                 while (i < count) : (i += 1) {
-                    // Read memory index (must be 0 in WASM 1.0)
-                    const memory_idx = try data_reader.readLEB128();
-                    if (memory_idx != 0) return error.InvalidMemoryIndex;
-
-                    // Read offset expression (must be a constant)
-                    const offset_opcode = try data_reader.readByte();
-                    var offset: u32 = 0;
-
-                    switch (offset_opcode) {
-                        0x41 => { // i32.const
-                            offset = try data_reader.readLEB128();
-                        },
-                        else => return error.InvalidOffsetExpression,
-                    }
-
-                    // Skip end opcode
-                    const end_opcode = try data_reader.readByte();
-                    if (end_opcode != 0x0b) return error.InvalidModule;
-
-                    // Read data bytes
-                    const data_size = try data_reader.readLEB128();
-                    const data = try data_reader.readBytes(data_size);
-
-                    o.log("  Data segment {d}: memory={d}, offset=0x{X}, size={d}", .{
-                        i, memory_idx, offset, data_size,
-                    });
-
-                    // Check if memory is initialized
-                    if (module.memory == null) {
-                        o.log("  Memory not initialized, initializing with default size", .{});
-                        const default_size = offset + data_size;
-                        module.memory = try allocator.alloc(u8, default_size);
-                        @memset(module.memory.?, 0);
-                    }
-
-                    // Check if offset + data_size is within memory bounds
-                    if (offset + data_size > module.memory.?.len) {
-                        o.log("  Data segment exceeds memory bounds: {d} + {d} > {d}", .{
-                            offset, data_size, module.memory.?.len,
-                        });
-
-                        // Resize memory to fit data
-                        const new_size = offset + data_size;
-                        const new_memory = try allocator.alloc(u8, new_size);
-                        @memcpy(new_memory[0..module.memory.?.len], module.memory.?);
-                        @memset(new_memory[module.memory.?.len..], 0);
-
-                        allocator.free(module.memory.?);
-                        module.memory = new_memory;
-                    }
-
-                    // Copy data to memory
-                    @memcpy(module.memory.?[offset .. offset + data_size], data);
-
-                    o.log("  Initialized memory[0x{X}..0x{X}] with data", .{
-                        offset, offset + data_size,
-                    });
-
-                    // Debug: o.log( the first few bytes of the data if it's not too large
-                    if (data_size <= 64) {
-                        o.log("  Data contents: ", .{});
-                        for (data) |byte| {
-                            if (byte >= 32 and byte <= 126) {
-                                // o.log(able ASCII character
-                                o.log("{c}", .{byte});
-                            } else {
-                                // Non-o.log(able character, show as hex
-                                o.log("\\x{X:0>2}", .{byte});
+                    const flags = try data_reader.readLEB128();
+                    switch (flags) {
+                        0 => { // active, memidx=0
+                            // offset expr
+                            const op = try data_reader.readByte();
+                            if (op != 0x41) return error.InvalidOffsetExpression; // i32.const
+                            const offset = try data_reader.readLEB128();
+                            const end = try data_reader.readByte();
+                            if (end != 0x0B) return error.InvalidModule;
+                            const data_size = try data_reader.readLEB128();
+                            const data = try data_reader.readBytes(data_size);
+                            o.log("  Active data seg {d}: offset=0x{X}, size={d}", .{ i, offset, data_size });
+                            if (module.memory == null) {
+                                const new_size = offset + data_size;
+                                module.memory = try allocator.alloc(u8, new_size);
+                                @memset(module.memory.?, 0);
                             }
-                        }
-                        o.log("\n", .{});
+                            if (offset + data_size > module.memory.?.len) {
+                                const new_size = offset + data_size;
+                                const new_memory = try allocator.alloc(u8, new_size);
+                                @memcpy(new_memory[0..module.memory.?.len], module.memory.?);
+                                @memset(new_memory[module.memory.?.len..], 0);
+                                allocator.free(module.memory.?);
+                                module.memory = new_memory;
+                            }
+                            @memcpy(module.memory.?[offset .. offset + data_size], data);
+                        },
+                        1 => { // passive
+                            const data_size = try data_reader.readLEB128();
+                            const data = try allocator.alloc(u8, data_size);
+                            const seg_bytes = try data_reader.readBytes(data_size);
+                            @memcpy(data, seg_bytes);
+                            try module.passive_data_segments.append(allocator, data);
+                            try module.passive_data_dropped.append(allocator, false);
+                            o.log("  Stored passive data seg {d} size={d}", .{ i, data_size });
+                        },
+                        2 => { // active with memidx
+                            const memidx = try data_reader.readLEB128();
+                            _ = memidx; // only 0 supported
+                            const op = try data_reader.readByte();
+                            if (op != 0x41) return error.InvalidOffsetExpression;
+                            const offset = try data_reader.readLEB128();
+                            const end = try data_reader.readByte();
+                            if (end != 0x0B) return error.InvalidModule;
+                            const data_size = try data_reader.readLEB128();
+                            const data = try data_reader.readBytes(data_size);
+                            o.log("  Active (memidx) data seg {d}: offset=0x{X}, size={d}", .{ i, offset, data_size });
+                            if (module.memory == null) {
+                                const new_size = offset + data_size;
+                                module.memory = try allocator.alloc(u8, new_size);
+                                @memset(module.memory.?, 0);
+                            }
+                            if (offset + data_size > module.memory.?.len) {
+                                const new_size = offset + data_size;
+                                const new_memory = try allocator.alloc(u8, new_size);
+                                @memcpy(new_memory[0..module.memory.?.len], module.memory.?);
+                                @memset(new_memory[module.memory.?.len..], 0);
+                                allocator.free(module.memory.?);
+                                module.memory = new_memory;
+                            }
+                            @memcpy(module.memory.?[offset .. offset + data_size], data);
+                        },
+                        else => return error.InvalidModule,
                     }
                 }
             },
@@ -738,6 +748,18 @@ pub fn deinit(self: *Module) void {
     if (self.table) |*table| {
         table.deinit(self.allocator);
     }
+    // Free passive data segments
+    for (self.passive_data_segments.items) |seg| {
+        self.allocator.free(seg);
+    }
+    self.passive_data_segments.deinit(self.allocator);
+    self.passive_data_dropped.deinit(self.allocator);
+    // Free passive element segments
+    for (self.passive_elem_segments.items) |seg| {
+        self.allocator.free(seg);
+    }
+    self.passive_elem_segments.deinit(self.allocator);
+    self.passive_elem_dropped.deinit(self.allocator);
     self.globals.deinit(self.allocator);
     self.imports.deinit(self.allocator);
     self.exports.deinit(self.allocator);

@@ -2,7 +2,6 @@ const std = @import("std");
 const str = []const u8;
 const debug = std.debug;
 pub const Color = @import("fmt/color.zig");
-const config = @import("../cmd/config.zig");
 
 // Global logger switch. Set to true only when you want verbose tracing.
 pub const ENABLE_LOG: bool = false;
@@ -34,7 +33,7 @@ pub const Op = struct {
     kind: str,
     name: []const u8,
     pub fn new(name: []const u8, msg: str) @This() {
-        return .{ .name = name, .msg = msg, .debug = true };
+        return .{ .name = name, .msg = msg, .debug = ENABLE_LOG };
     }
     pub fn log(self: @This(), kind: Message) Log {
         return switch (kind) {
@@ -50,7 +49,7 @@ pub const Err = struct {
     kind: []const u8,
     msg: str,
     pub fn new(name: []const u8, msg: str) @This() {
-        return .{ .name = name, .msg = msg, .debug = true };
+        return .{ .name = name, .msg = msg, .debug = ENABLE_LOG };
     }
     pub fn log(self: @This(), kind: Message) Log {
         return switch (kind) {
@@ -66,7 +65,7 @@ pub const Warning = struct {
     debug: bool,
     msg: str,
     pub fn new(name: []const u8, msg: str) @This() {
-        return .{ .name = name, .msg = msg, .debug = true };
+        return .{ .name = name, .msg = msg, .debug = ENABLE_LOG };
     }
     pub fn log(self: @This(), kind: Message) Log {
         return switch (kind) {
@@ -82,7 +81,7 @@ pub const Debug = struct {
     debug: bool,
     msg: str,
     pub fn new(name: []const u8, msg: str) @This() {
-        return .{ .name = name, .msg = msg, .debug = true };
+        return .{ .name = name, .msg = msg, .debug = ENABLE_LOG };
     }
     pub fn log(self: @This(), kind: Message) Log {
         return switch (kind) {
@@ -98,7 +97,7 @@ pub const Info = struct {
     msg: str,
     debug: bool,
     pub fn new(name: []const u8, msg: str) @This() {
-        return .{ .name = name, .msg = msg, .debug = true };
+        return .{ .name = name, .msg = msg, .debug = ENABLE_LOG };
     }
     pub fn log(self: @This(), kind: Message) Log {
         return switch (kind) {
@@ -114,7 +113,7 @@ pub const Trace = struct {
     msg: str,
     debug: bool,
     pub fn new(name: []const u8, msg: str) @This() {
-        return .{ .name = name, .msg = msg, .debug = true };
+        return .{ .name = name, .msg = msg, .debug = ENABLE_LOG };
     }
     pub fn log(self: @This(), kind: Message) Log {
         return switch (kind) {
@@ -231,31 +230,31 @@ pub const Log = union(Message) {
 
     /// Creates a debug message
     pub fn dbg(k: str, n: str) Log {
-        return .{ .debug = .{ .debug = true, .kind = k, .msg = n } };
+        return .{ .debug = .{ .debug = ENABLE_LOG, .kind = k, .msg = n } };
     }
 
     /// Creates an info message
     pub fn inf(k: str, n: str) Log {
-        return .{ .info = .{ .debug = true, .kind = k, .msg = n } };
+        return .{ .info = .{ .debug = ENABLE_LOG, .kind = k, .msg = n } };
     }
 
     /// Creates an error message
     pub fn err(k: str, n: str) Log {
-        return .{ .@"error" = .{ .debug = true, .kind = k, .msg = n } };
+        return .{ .@"error" = .{ .debug = ENABLE_LOG, .kind = k, .msg = n } };
     }
 
     /// Creates an opcode message
     pub fn op(k: str, n: str) Log {
-        return .{ .opcode = .{ .debug = true, .kind = k, .name = n } };
+        return .{ .opcode = .{ .debug = ENABLE_LOG, .kind = k, .name = n } };
     }
 
     /// Creates a warning message
     pub fn warn(k: str, n: str) Log {
-        return .{ .warning = .{ .debug = true, .kind = k, .msg = n } };
+        return .{ .warning = .{ .debug = ENABLE_LOG, .kind = k, .msg = n } };
     }
 
     /// Creates a trace message
     pub fn trc(k: str, n: str) Log {
-        return .{ .trace = .{ .debug = true, .kind = k, .msg = n } };
+        return .{ .trace = .{ .debug = ENABLE_LOG, .kind = k, .msg = n } };
     }
 };

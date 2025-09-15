@@ -2,8 +2,18 @@ const std = @import("std");
 
 pub const OpType = enum(u4) {
     control,
-    parametric,
-    variable,
+    throw,
+    branch,
+    call,
+    local,
+    global,
+    ref,
+    table,
+    // parametric and variable merged under other groups in runtime
     memory,
-    numeric,
+    @"return",
+    i32,
+    i64,
+    f32,
+    f64,
 };

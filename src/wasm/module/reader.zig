@@ -28,21 +28,24 @@ pub fn readLEB128(self: *Reader) !u32 {
 
 // Read signed LEB128 into i32
 pub fn readSLEB32(self: *Reader) !i32 {
-    var result: i32 = 0;
-    var shift: u5 = 0;
+    var result: u32 = 0;
+    var shift: u8 = 0;
     var byte: u8 = 0;
+
     while (true) {
         byte = try self.readByte();
-        const low = @as(i32, @intCast(byte & 0x7F));
-        result |= (low << shift);
+        const low = @as(u32, byte & 0x7F);
+        result |= (low << @as(u5, @intCast(shift)));
         shift += 7;
         if (byte & 0x80 == 0) break;
     }
+
     // sign extend if needed
     if (shift < 32 and (byte & 0x40) != 0) {
-        result |= @as(i32, -1) << shift;
+        result |= (@as(u32, 0xFFFFFFFF) << @as(u5, @intCast(shift)));
     }
-    return result;
+
+    return @as(i32, @bitCast(result));
 }
 
 // Read signed LEB128 into i64

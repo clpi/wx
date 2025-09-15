@@ -26,7 +26,7 @@ pub fn deinit(self: *WASI) void {
 }
 
 /// Initialize the WASM module with WASI imports
-pub fn setupModule(self: *WASI, runtime: *Runtime, module: *Module) !void {
+pub fn setupModule(self: *WASI, _: *Runtime, module: *Module) !void {
     var o = Log.op("WASI", "setupModule");
     var e = Log.err("WASI", "setupModule");
     // Setup memory for args
@@ -35,17 +35,11 @@ pub fn setupModule(self: *WASI, runtime: *Runtime, module: *Module) !void {
         return error.NoMemory;
     }
 
-    // Check if the data section is initialized
-    o.log("Setting up WASI module with memory size: {d} bytes\n", .{module.memory.?.len});
-
-    // Initialize command line arguments in memory
-    const args_info = try self.setupArgs(module);
-    o.log("Initialized args: argc={d}, argv_ptr={d}\n", .{ args_info.argc, args_info.argv_ptr });
-
-    _ = runtime;
-    // Do not modify the module's type or import tables here; WASI imports are
-    // already declared in the module. This function is responsible for
-    // preparing memory (argv/environ) only.
+    // Avoid pre-populating argv in linear memory here to prevent clobbering
+    // the guest's data segment. The guest will call args_sizes_get and
+    // args_get; we implement those to write into guest-provided pointers.
+    o.log("WASI ready (memory size: {d} bytes)\n", .{module.memory.?.len});
+    _ = self; // silence unused warnings in some Zig versions
 }
 
 /// Write data to stdout

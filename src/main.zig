@@ -1,5 +1,4 @@
 const Runtime = @import("wasm/runtime.zig");
-const cmd = @import("cmd.zig");
 const std = @import("std");
 const Value = Runtime.Value;
 const print = @import("util/fmt.zig").print;
@@ -57,10 +56,12 @@ pub fn main() !void {
         }
     }
 
-    var a = try std.process.ArgIterator.initWithAllocator(allocator);
-    defer a.deinit();
-    _ = a.skip();
-    const wpath = a.next();
+    // Find first non-flag argument as the WASM path
+    var wpath: ?[:0]u8 = null;
+    for (as[1..]) |arg| {
+        if (arg.len == 0) continue;
+        if (arg[0] != '-') { wpath = arg; break; }
+    }
 
     // Ensure we have a WASM file path
     if (wpath == null) {
