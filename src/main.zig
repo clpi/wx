@@ -17,6 +17,7 @@ fn printHelp(program_name: []const u8) void {
     print("Options:\n", .{}, Color.yellow);
     print("  -h, --help      Show this help message\n", .{}, Color.white);
     print("  -d, --debug     Enable debug output\n", .{}, Color.white);
+    print("  -j, --jit       Enable JIT compilation\n", .{}, Color.white);
     print("  -v, --version   Show version information\n\n", .{}, Color.white);
 
     print("Examples:\n", .{}, Color.yellow);
@@ -100,6 +101,24 @@ pub fn main() !void {
     // Set runtime flags before loading module
     runtime.debug = cfg.debug;
     runtime.validate = cfg.validate;
+    runtime.jit_enabled = cfg.jit;
+
+    if (cfg.debug) {
+        std.debug.print("Config: debug={}, validate={}, jit={}\n", .{cfg.debug, cfg.validate, cfg.jit});
+        std.debug.print("Runtime: debug={}, validate={}, jit_enabled={}\n", .{runtime.debug, runtime.validate, runtime.jit_enabled});
+    }
+
+    // Initialize JIT if enabled
+    if (runtime.jit_enabled) {
+        if (cfg.debug) std.debug.print("Initializing JIT...\n", .{});
+        runtime.jit = Runtime.JIT.init(allocator) catch |err| blk: {
+            if (cfg.debug) std.debug.print("JIT initialization failed: {s}\n", .{@errorName(err)});
+            break :blk null;
+        };
+        if (runtime.jit) |_| {
+            if (cfg.debug) std.debug.print("JIT initialized successfully\n", .{});
+        }
+    }
 
     // Load WASM module, fallback to no-validation if validation fails
     var module_load_err: ?anyerror = null;

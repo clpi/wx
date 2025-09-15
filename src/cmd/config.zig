@@ -4,6 +4,7 @@ pub const Config = struct {
     debug: bool = false,
     validate: bool = true,
     help: bool = false,
+    jit: bool = false,
     version: []const u8 = "0.1.0",
 };
 
@@ -16,6 +17,8 @@ pub fn fromArgs(args: [][:0]u8) Config {
     for (args) |arg| {
         if (is(arg, "--debug", "-d")) {
             cfg.debug = true;
+        } else if (is(arg, "--jit", "-j")) {
+            cfg.jit = true;
         } else if (is(arg, "--no-validate", "")) {
             cfg.validate = false;
         } else if (is(arg, "--help", "-h")) {

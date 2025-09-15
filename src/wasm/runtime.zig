@@ -15,9 +15,38 @@ pub const Module = @import("module.zig");
 pub const WASI = @import("wasi.zig");
 pub const Op = @import("op.zig").Op;
 pub const Error = @import("op.zig").Error;
+pub const JIT = @import("jit.zig").JIT;
 
 // Near the top of the file, add Function import
 const Function = Module.Function;
+
+// Function pointer type for fast dispatch
+const OpHandlerFn = *const fn (*Runtime, *Module.Reader, *Module, *SmallVec(Value, 256)) Error!void;
+
+// Inline arithmetic operation helpers for maximum performance
+inline fn fastI32Add(stack: *SmallVec(Value, 256)) !void {
+    const len = stack.items.len;
+    const b = stack.items[len - 1].i32;
+    const a = stack.items[len - 2].i32;
+    stack.items[len - 2] = .{ .i32 = a +% b };
+    stack.shrinkRetainingCapacity(len - 1);
+}
+
+inline fn fastI32Sub(stack: *SmallVec(Value, 256)) !void {
+    const len = stack.items.len;
+    const b = stack.items[len - 1].i32;
+    const a = stack.items[len - 2].i32;
+    stack.items[len - 2] = .{ .i32 = a -% b };
+    stack.shrinkRetainingCapacity(len - 1);
+}
+
+inline fn fastI32Mul(stack: *SmallVec(Value, 256)) !void {
+    const len = stack.items.len;
+    const b = stack.items[len - 1].i32;
+    const a = stack.items[len - 2].i32;
+    stack.items[len - 2] = .{ .i32 = a *% b };
+    stack.shrinkRetainingCapacity(len - 1);
+}
 const BlockType = Block.Type;
 const BytecodeReader = Module.Reader;
 inline fn asI32(v: Value) i32 {
@@ -45,6 +74,9 @@ stack: SmallVec(Value, 256),
 block_stack: SmallVec(Block, 64),
 module: ?*Module,
 wasi: ?WASI = null,
+// JIT compiler instance
+jit: ?JIT = null,
+jit_enabled: bool = false,
 
 // New field: Block position index mapping
 // Maps instruction positions to their containing block index
@@ -75,6 +107,8 @@ pub fn init(allocator: Allocator) !*Runtime {
     runtime.block_stack = SmallVec(Block, 64).init();
     runtime.block_position_map = std.AutoHashMap(usize, usize).init(allocator);
     runtime.function_summary = std.AutoHashMap(usize, FunctionSummary).init(allocator);
+
+    // JIT will be initialized later when jit_enabled is set
     return runtime;
 }
 
@@ -107,6 +141,12 @@ pub fn deinit(self: *Runtime) void {
     // Free block position map
     o.log("Freeing block position map", .{});
     self.block_position_map.deinit();
+
+    // Free JIT resources
+    if (self.jit) |*jit| {
+        o.log("Freeing JIT resources", .{});
+        jit.deinit();
+    }
 
     // Free function summaries
     o.log("Freeing function summaries", .{});
@@ -323,6 +363,29 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
         std.debug.print("[wx] enter func {d}, params={d}, locals={d}, codelen={d}\n", .{ func_index, args.len, func.locals.len, func.code.len });
     }
 
+    // JIT compilation check
+    if (self.jit) |*jit| {
+        const should_compile = try jit.profileFunction(@intCast(func_index));
+        if (should_compile) {
+            if (self.debug) std.debug.print("Compiling function {d} to native code\n", .{func_index});
+            const compiled = jit.compileFunction(module, @intCast(func_index)) catch |err| blk: {
+                if (self.debug) std.debug.print("JIT compilation failed: {s}, falling back to interpreter\n", .{@errorName(err)});
+                break :blk null;
+            };
+
+            if (compiled) |comp_func| {
+                if (self.debug) std.debug.print("Executing JIT-compiled function {d}\n", .{func_index});
+                // Call compiled function
+                const result = comp_func.entry_point(self, @constCast(args));
+                return result;
+            }
+        } else if (jit.compiled_functions.get(@intCast(func_index))) |compiled| {
+            if (self.debug) std.debug.print("Executing cached JIT-compiled function {d}\n", .{func_index});
+            const result = compiled.entry_point(self, @constCast(args));
+            return result;
+        }
+    }
+
     // Type check arguments
     if (args.len != func_type.params.len) {
         Log.err("Type mismatch", "args").log(
@@ -495,12 +558,294 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
         // Do not treat type marker bytes (e.g. 0x40, 0x7F..0x7C) as standalone opcodes.
         // They are immediates to control instructions and will be consumed in-context.
 
-        const op_match = Op.match(opcode) orelse {
-            std.debug.print("Unknown opcode 0x{X:0>2} at pos {d}\n", .{ opcode, code_reader.pos - 1 });
-            return Error.InvalidOpcode;
-        };
+        // Fast dispatch table optimization
+        switch (opcode) {
+            // i32 arithmetic (most common operations first) - ultra-optimized versions
+            0x6A => { // i32.add
+                if (self.stack.items.len < 2) return Error.StackUnderflow;
+                try fastI32Add(&self.stack);
+            },
+            0x6B => { // i32.sub
+                if (self.stack.items.len < 2) return Error.StackUnderflow;
+                try fastI32Sub(&self.stack);
+            },
+            0x6C => { // i32.mul
+                if (self.stack.items.len < 2) return Error.StackUnderflow;
+                try fastI32Mul(&self.stack);
+            },
+            0x6D => { // i32.div_s
+                const len = self.stack.items.len;
+                if (len < 2) return Error.StackUnderflow;
+                const b = self.stack.items[len - 1].i32;
+                const a = self.stack.items[len - 2].i32;
+                if (b == 0) return Error.DivideByZero;
+                self.stack.items[len - 2] = .{ .i32 = @divTrunc(a, b) };
+                self.stack.shrinkRetainingCapacity(len - 1);
+            },
+            0x6F => { // i32.rem_s
+                const len = self.stack.items.len;
+                if (len < 2) return Error.StackUnderflow;
+                const b = self.stack.items[len - 1].i32;
+                const a = self.stack.items[len - 2].i32;
+                if (b == 0) return Error.DivideByZero;
+                self.stack.items[len - 2] = .{ .i32 = @rem(a, b) };
+                self.stack.shrinkRetainingCapacity(len - 1);
+            },
+            0x41 => { // i32.const
+                const val = try code_reader.readSLEB32();
+                try self.stack.append(self.allocator, .{ .i32 = val });
+            },
+            0x46 => { // i32.eq
+                const len = self.stack.items.len;
+                if (len < 2) return Error.StackUnderflow;
+                const b = self.stack.items[len - 1].i32;
+                const a = self.stack.items[len - 2].i32;
+                self.stack.items[len - 2] = .{ .i32 = if (a == b) 1 else 0 };
+                self.stack.shrinkRetainingCapacity(len - 1);
+            },
+            0x4A => { // i32.gt_s
+                const len = self.stack.items.len;
+                if (len < 2) return Error.StackUnderflow;
+                const b = self.stack.items[len - 1].i32;
+                const a = self.stack.items[len - 2].i32;
+                self.stack.items[len - 2] = .{ .i32 = if (a > b) 1 else 0 };
+                self.stack.shrinkRetainingCapacity(len - 1);
+            },
+            0x48 => { // i32.lt_s
+                const len = self.stack.items.len;
+                if (len < 2) return Error.StackUnderflow;
+                const b = self.stack.items[len - 1].i32;
+                const a = self.stack.items[len - 2].i32;
+                self.stack.items[len - 2] = .{ .i32 = if (a < b) 1 else 0 };
+                self.stack.shrinkRetainingCapacity(len - 1);
+            },
+            0x4C => { // i32.le_s
+                const len = self.stack.items.len;
+                if (len < 2) return Error.StackUnderflow;
+                const b = self.stack.items[len - 1].i32;
+                const a = self.stack.items[len - 2].i32;
+                self.stack.items[len - 2] = .{ .i32 = if (a <= b) 1 else 0 };
+                self.stack.shrinkRetainingCapacity(len - 1);
+            },
+            0x20 => { // local.get
+                const idx = try code_reader.readLEB128();
+                if (idx >= locals_env.items.len) return Error.InvalidAccess;
+                try self.stack.append(self.allocator, locals_env.items[idx]);
+            },
+            0x21 => { // local.set
+                const idx = try code_reader.readLEB128();
+                if (idx >= locals_env.items.len) return Error.InvalidAccess;
+                if (self.stack.items.len == 0) return Error.StackUnderflow;
+                locals_env.items[idx] = self.stack.pop().?;
+            },
+            // Control flow
+            0x04 => { // if
+                if (self.stack.items.len < 1) {
+                    return Error.StackUnderflow;
+                }
 
-        switch (op_match) {
+                const condition_opt = self.stack.pop();
+                const condition = condition_opt.?;
+
+                if (@as(ValueType, std.meta.activeTag(condition)) != .i32) {
+                    return Error.TypeMismatch;
+                }
+
+                // Read block type
+                const bt = try code_reader.readByte();
+
+                // Get result type if any
+                var result_type: ?ValueType = null;
+                if (bt == 0x40) {
+                    // Empty (void) result type
+                } else if (bt >= 0x7C and bt <= 0x7F) {
+                    // Value type result
+                    result_type = switch (bt) {
+                        0x7F => ValueType.i32,
+                        0x7E => ValueType.i64,
+                        0x7D => ValueType.f32,
+                        0x7C => ValueType.f64,
+                        else => return Error.InvalidOpcode,
+                    };
+                } else {
+                    // Function type index - not implemented
+                    return Error.InvalidOpcode;
+                }
+
+                // Save the if position (position of opcode byte)
+                const if_pos = code_reader.pos - 2;
+
+                // Add block to stack
+                const block_idx = block_stack.items.len;
+                try block_stack.append(self.allocator, .{
+                    .type = .@"if",
+                    .pos = if_pos,
+                    .start_stack_size = self.stack.items.len,
+                    .result_type = result_type,
+                });
+
+                // Register block in position map
+                try self.registerBlock(if_pos, block_idx);
+
+                if (condition.i32 == 0) {
+                    // Condition is false, skip to else or end at the same nesting depth
+                    if (try self.findElseOrEnd(func, &code_reader, code_reader.pos)) |res| {
+                        if (res.else_pos) |ep| {
+                            // Jump to just after else opcode to execute else-body
+                            block_stack.items[block_idx].else_pos = ep;
+                            code_reader.pos = ep + 1;
+                        } else {
+                            // No else: jump after end and pop the if block immediately
+                            block_stack.items[block_idx].end_pos = res.end_pos;
+                            code_reader.pos = res.end_pos + 1;
+                            _ = block_stack.pop();
+                        }
+                    } else {
+                        // No else/end found; bail to end of function
+                        code_reader.pos = func.code.len;
+                        _ = block_stack.pop();
+                    }
+                } else {
+                    // Condition is true, execute if block
+                    _ = try self.findMatchingEnd(func, &code_reader, code_reader.pos, .@"if");
+                }
+            },
+            0x0C => { // br (branch)
+                const label_idx = try code_reader.readLEB128();
+                if (label_idx >= block_stack.items.len) return Error.InvalidAccess;
+
+                const target_block_idx = block_stack.items.len - 1 - label_idx;
+                const target_block = block_stack.items[target_block_idx];
+
+                // For loops, jump to the beginning; for others, jump to end
+                if (target_block.type == .loop) {
+                    code_reader.pos = target_block.pos;
+                } else {
+                    if (try self.findMatchingEnd(func, &code_reader, target_block.pos, target_block.type)) |end_pos| {
+                        code_reader.pos = end_pos + 1;
+                    } else {
+                        code_reader.pos = func.code.len;
+                    }
+                }
+
+                // Pop blocks above the target
+                while (block_stack.items.len > target_block_idx + 1) {
+                    _ = block_stack.pop();
+                }
+            },
+            0x0D => { // br_if (conditional branch)
+                const label_idx = try code_reader.readLEB128();
+                if (self.stack.items.len == 0) return Error.StackUnderflow;
+
+                const condition = self.stack.pop().?;
+                if (@as(ValueType, std.meta.activeTag(condition)) != .i32) {
+                    return Error.TypeMismatch;
+                }
+
+                if (condition.i32 != 0) {
+                    // Branch taken - same logic as br
+                    if (label_idx >= block_stack.items.len) return Error.InvalidAccess;
+
+                    const target_block_idx = block_stack.items.len - 1 - label_idx;
+                    const target_block = block_stack.items[target_block_idx];
+
+                    if (target_block.type == .loop) {
+                        code_reader.pos = target_block.pos;
+                    } else {
+                        if (try self.findMatchingEnd(func, &code_reader, target_block.pos, target_block.type)) |end_pos| {
+                            code_reader.pos = end_pos + 1;
+                        } else {
+                            code_reader.pos = func.code.len;
+                        }
+                    }
+
+                    // Pop blocks above the target
+                    while (block_stack.items.len > target_block_idx + 1) {
+                        _ = block_stack.pop();
+                    }
+                }
+            },
+            0x03 => { // loop
+                const block = try code_reader.readByte();
+
+                // Parse block type to determine result type
+                var result_type: ?ValueType = null;
+                if (block != 0x40) { // 0x40 is void type
+                    result_type = try ValueType.fromByte(block);
+                }
+
+                try block_stack.append(self.allocator, .{
+                    .type = .loop,
+                    .pos = code_reader.pos,
+                    .start_stack_size = self.stack.items.len,
+                    .result_type = result_type,
+                });
+            },
+            0x0B => { // end
+                if (block_stack.items.len == 0) {
+                    // End of function
+                    break;
+                }
+
+                const block = block_stack.pop();
+
+                // If block has a result type, ensure we have a value
+                var result_value: ?Value = null;
+                if (block.?.result_type != null) {
+                    if (self.stack.items.len > 0) {
+                        result_value = self.stack.pop();
+                    } else {
+                        // No value on stack, use default value as a recovery mechanism
+                        const default_val: Value = switch (block.?.result_type.?) {
+                            .i32 => .{ .i32 = 0 },
+                            .i64 => .{ .i64 = 0 },
+                            .f32 => .{ .f32 = 0.0 },
+                            .f64 => .{ .f64 = 0.0 },
+                            .funcref => .{ .funcref = null },
+                            .externref => .{ .externref = null },
+                            else => return Error.TypeMismatch,
+                        };
+                        result_value = default_val;
+                    }
+                }
+
+                // Restore stack to the size before the block, plus the result value if any
+                const target_stack_size = block.?.start_stack_size;
+
+                // Safety check - don't attempt to pop beyond zero
+                if (self.stack.items.len > target_stack_size) {
+                    // Remove any extra values that were pushed during block execution
+                    const to_pop = self.stack.items.len - target_stack_size;
+
+                    for (0..to_pop) |_| {
+                        _ = self.stack.pop();
+                    }
+                } else if (self.stack.items.len < target_stack_size) {
+                    // Stack underflow - missing values, recover by adding zeroes
+                    const to_push = target_stack_size - self.stack.items.len;
+
+                    for (0..to_push) |_| {
+                        try self.stack.append(self.allocator, .{ .i32 = 0 });
+                    }
+                }
+
+                // Add back the result value if there is one
+                if (result_value != null) {
+                    try self.stack.append(self.allocator, result_value.?);
+                }
+            },
+            // 0x10 call - handled in fallback for now
+            0x0F => { // return
+                break;
+            },
+            // Fallback for remaining opcodes
+            else => {
+                const op_match = Op.match(opcode) orelse {
+                    std.debug.print("Unknown opcode 0x{X:0>2} at pos {d}\n", .{ opcode, code_reader.pos - 1 });
+                    return Error.InvalidOpcode;
+                };
+
+                switch (op_match) {
             .throw => |t| switch (t) {
                 .@"try" => {
                     var o = Log.op("try", "");
@@ -4126,8 +4471,10 @@ pub fn executeFunction(self: *Runtime, func_index: usize, args: []const Value) !
                     try self.stack.append(self.allocator, .{ .i32 = result });
                 },
             },
-        }
-    }
+                } // end of op_match switch
+            } // end of else case
+        } // end of main opcode switch
+    } // end of execution loop
 
     // Handle function return value
     if (func_type.results.len > 0) {
