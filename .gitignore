@@ -1,3 +1,4 @@
+bench_extended.py
 .aider*
 .cursorrules
 .zig-out
@@ -12,3 +13,4 @@ GEMINI.md
 .github/copilot-instructions.md
 WARP.md
 bench/
+examples/
