@@ -1,0 +1,24 @@
+name: Build
+
+on: [push]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.1"
+      - name: Run zig fmt
+        run: zig fmt --check .
+      - name: Run zig build
+        run: zig build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wx-${{ matrix.os }}
+          path: ./zig-out/bin/wx
