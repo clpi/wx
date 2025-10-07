@@ -86,13 +86,19 @@ all: b examples
 wat-wasm:
 	@if command -v wat2wasm >/dev/null 2>&1; then \
 		echo "Compiling WAT workloads..."; \
-		wat2wasm examples/opcodes_cli.wat -o examples/opcodes_cli.wasm; \
-		wat2wasm examples/opcodes_compat.wat -o examples/opcodes_compat.wasm; \
+		cd examples && for f in *.wat; do \
+			[ -f "$$f" ] && echo "  Compiling $$f..." && wat2wasm "$$f" -o "$${f%.wat}.wasm"; \
+		done; \
 	else \
 		echo "wat2wasm not found; skipping WAT builds"; \
 	fi
 
 .PHONY: b r examples run-hello run-math run-fibonacci run-array test clean-examples
-.PHONY: bench
+.PHONY: bench bench-full
 bench: b wat-wasm
 	bench/run.sh
+
+# Run full benchmark suite against wasmer and wasmtime
+bench-full: b wat-wasm
+	@echo "Running comprehensive benchmark suite..."
+	python3 bench_extended.py

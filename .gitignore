@@ -1,4 +1,3 @@
-bench_extended.py
 .aider*
 .cursorrules
 .zig-out
@@ -12,5 +11,8 @@ CLAUDE.md
 GEMINI.md
 .github/copilot-instructions.md
 WARP.md
-bench/
-examples/
+# Allow benchmark files but ignore generated artifacts
+bench/PERFORMANCE_REPORT.md
+bench/FINAL_PERFORMANCE_REPORT.md
+bench/ULTIMATE_PERFORMANCE_REPORT.md
+bench/TOTAL_VICTORY_REPORT.md
