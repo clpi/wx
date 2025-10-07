@@ -1,0 +1,40 @@
+# Git files
+.git
+.gitignore
+.gitmodules
+
+# Build artifacts
+zig-out
+zig-cache
+.zig-cache
+.zig-cache-global
+
+# IDE and editor files
+.vscode
+.DS_Store
+.aider*
+.cursorrules
+.claude/
+.cursor/
+.gemini/
+
+# Documentation that isn't needed in the image
+*.md
+!README.md
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+WARP.md
+.github/copilot-instructions.md
+
+# Benchmark artifacts
+bench/PERFORMANCE_REPORT.md
+bench/FINAL_PERFORMANCE_REPORT.md
+bench/ULTIMATE_PERFORMANCE_REPORT.md
+bench/TOTAL_VICTORY_REPORT.md
+
+# Nix files
+flake.nix
+
+# Homebrew
+Brewfile
