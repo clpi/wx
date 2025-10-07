@@ -10,6 +10,34 @@ New: a WASI CLI workload `opcodes_cli.wasm` that exercises core WASM operations 
 
 ### Installation
 
+#### Package Managers
+
+**Homebrew (macOS and Linux):**
+```bash
+brew install clpi/tap/wx
+# or as a cask (macOS only)
+brew install --cask wx
+```
+
+**Nix/NixOS:**
+```bash
+nix run github:clpi/wx
+```
+
+**Arch Linux (AUR):**
+```bash
+yay -S wx-bin
+```
+
+**MacPorts (macOS):**
+```bash
+sudo port install wx
+```
+
+For more details on package distribution, see [PACKAGING.md](PACKAGING.md).
+
+#### Building from Source
+
 Build the runtime and examples:
 
 - `zig build` — build the `wx` binary

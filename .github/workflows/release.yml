@@ -157,7 +157,7 @@ jobs:
                                   size    SKIP
           }
 
-          extract.only        
+          extract.only
 
           use_configure       no
 
@@ -172,7 +172,7 @@ jobs:
           cat > wx.rb << 'EOF'
           cask "wx" do
             version "${{ steps.version.outputs.version }}"
-            
+
             if Hardware::CPU.intel?
               sha256 "${{ steps.checksums.outputs.macos_x86_64_sha256 }}"
               url "https://github.com/clpi/wx/releases/download/#{version}/wx-macos-x86_64"

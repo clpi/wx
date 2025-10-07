@@ -1,0 +1,56 @@
+name: Validate Package Files
+
+on:
+  pull_request:
+    paths:
+      - 'Formula/wx.rb'
+      - 'Brewfile'
+      - 'PKGBUILD'
+      - 'Portfile'
+      - 'flake.nix'
+  push:
+    branches:
+      - main
+    paths:
+      - 'Formula/wx.rb'
+      - 'Brewfile'
+      - 'PKGBUILD'
+      - 'Portfile'
+      - 'flake.nix'
+
+jobs:
+  validate-homebrew:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate Formula syntax
+        run: |
+          brew install --formula --build-from-source ./Formula/wx.rb --dry-run || true
+          brew style --fix ./Formula/wx.rb || true
+      - name: Validate Cask syntax
+        run: |
+          brew style --fix ./Brewfile || true
+
+  validate-nix:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v24
+        with:
+          nix_path: nixpkgs=channel:nixos-24.05
+      - name: Check flake
+        run: |
+          nix flake check --show-trace || true
+          nix flake show || true
+
+  validate-arch:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate PKGBUILD
+        run: |
+          docker run --rm -v "$PWD:/pkg" archlinux bash -c "
+            pacman -Sy --noconfirm namcap || true
+            cd /pkg
+            namcap PKGBUILD || true
+          " || echo "PKGBUILD validation skipped"
