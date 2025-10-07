@@ -13,7 +13,11 @@ cask "wx" do
   desc "WebAssembly runtime written in Zig with basic WASI support"
   homepage "https://github.com/clpi/wx"
 
-  binary "wx-macos-#{Hardware::CPU.arch}", target: "wx"
+  if Hardware::CPU.intel?
+    binary "wx-macos-x86_64", target: "wx"
+  else
+    binary "wx-macos-aarch64", target: "wx"
+  end
 
   livecheck do
     url :url
