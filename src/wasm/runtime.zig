@@ -13,6 +13,7 @@ pub const Value = @import("value.zig").Value;
 pub const ValueType = @import("value.zig").Type;
 pub const Module = @import("module.zig");
 pub const WASI = @import("wasi.zig");
+pub const WASM4 = @import("wasm4.zig");
 pub const Op = @import("op.zig").Op;
 pub const Error = @import("op.zig").Error;
 pub const JIT = @import("jit.zig").JIT;
@@ -530,7 +531,7 @@ fn handleI32Rotr(runtime: *Runtime, reader: *Module.Reader, module: *Module, sta
 }
 const BlockType = Block.Type;
 const BytecodeReader = Module.Reader;
-inline fn asI32(v: Value) i32 {
+pub inline fn asI32(v: Value) i32 {
     return switch (@as(ValueType, std.meta.activeTag(v))) {
         .i32 => v.i32,
         .i64 => @intCast(v.i64),
@@ -540,7 +541,7 @@ inline fn asI32(v: Value) i32 {
     };
 }
 
-inline fn asU32(v: Value) u32 {
+pub inline fn asU32(v: Value) u32 {
     return @as(u32, @bitCast(asI32(v)));
 }
 const FunctionSummary = struct {
@@ -555,6 +556,7 @@ stack: SmallVec(Value, 256),
 block_stack: SmallVec(Block, 64),
 module: ?*Module,
 wasi: ?WASI = null,
+wasm4: ?WASM4 = null,
 // JIT compiler instance
 jit: ?JIT = null,
 jit_enabled: bool = false,
@@ -858,6 +860,13 @@ pub fn deinit(self: *Runtime) void {
         self.wasi = null;
     }
 
+    // Free WASM4 resources
+    if (self.wasm4) |*wasm4| {
+        o.log("Freeing WASM4 resources", .{});
+        wasm4.deinit();
+        self.wasm4 = null;
+    }
+
     // Free module resources if we own the module
     if (self.module) |module| {
         o.log("Freeing module resources", .{});
@@ -937,6 +946,20 @@ pub fn setupWASI(self: *Runtime, args: [][:0]u8) !void {
 
     if (self.module) |module| {
         try self.wasi.?.setupModule(self, module);
+    }
+}
+
+pub fn setupWASM4(self: *Runtime) !void {
+    if (self.wasm4 != null) {
+        self.wasm4.?.deinit();
+    }
+
+    self.wasm4 = try WASM4.init(self.allocator);
+    // Propagate runtime debug into WASM4 to control logging
+    self.wasm4.?.debug = self.debug;
+
+    if (self.module) |module| {
+        try self.wasm4.?.setupModule(module);
     }
 }
 
@@ -1396,6 +1419,14 @@ pub fn handleImport(self: *Runtime, module_name: []const u8, field_name: []const
             .{field_name},
         );
         return Error.UnknownImport;
+    } else if (std.mem.eql(u8, module_name, "env")) {
+        // Check if WASM4 is enabled and handle WASM4 imports
+        if (self.wasm4) |*wasm4| {
+            if (self.module) |module| {
+                return try wasm4.handleImport(field_name, args, self, module);
+            }
+        }
+        // Fall through to unknown import if WASM4 not initialized
     }
 
     Log.err("Unknown import module", "module_name").log(
