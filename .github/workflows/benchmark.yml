@@ -27,11 +27,13 @@ jobs:
           wat2wasm --version
 
       - name: Install Wasmer
+        continue-on-error: true
         run: |
           curl https://get.wasmer.io -sSfL | sh
           echo "$HOME/.wasmer/bin" >> $GITHUB_PATH
 
       - name: Install Wasmtime
+        continue-on-error: true
         run: |
           curl https://wasmtime.dev/install.sh -sSfL | bash
           echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
@@ -46,8 +48,14 @@ jobs:
           cd examples
           for f in *.wat; do
             if [ -f "$f" ]; then
-              echo "Compiling $f..."
-              wat2wasm "$f" -o "${f%.wat}.wasm"
+              wasm_file="${f%.wat}.wasm"
+              # Only compile if WASM file doesn't exist or WAT is newer
+              if [ ! -f "$wasm_file" ] || [ "$f" -nt "$wasm_file" ]; then
+                echo "Compiling $f..."
+                wat2wasm "$f" -o "$wasm_file"
+              else
+                echo "Skipping $f (WASM file is up to date)"
+              fi
             fi
           done
           ls -lh *.wasm
@@ -60,8 +68,8 @@ jobs:
           # Verify all runtimes are available
           echo "=== Runtime Versions ==="
           ./zig-out/bin/wx --help || echo "wx available"
-          wasmer --version
-          wasmtime --version
+          wasmer --version || echo "wasmer not available"
+          wasmtime --version || echo "wasmtime not available"
 
           # Run the benchmark suite
           python3 bench_extended.py

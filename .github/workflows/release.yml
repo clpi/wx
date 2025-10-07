@@ -51,8 +51,12 @@ jobs:
         run: |
           if [ -f "./zig-out/bin/${{ matrix.artifact_name }}" ]; then
             cp "./zig-out/bin/${{ matrix.artifact_name }}" "./${{ matrix.asset_name }}"
+            echo "Successfully created ${{ matrix.asset_name }}"
+            ls -lh "./${{ matrix.asset_name }}"
           else
             echo "Error: Binary not found at ./zig-out/bin/${{ matrix.artifact_name }}"
+            echo "Contents of ./zig-out/bin/:"
+            ls -la ./zig-out/bin/ || echo "Directory not found"
             exit 1
           fi
 
