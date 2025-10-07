@@ -75,6 +75,20 @@ This file tracks planned features, improvements, and known issues for the wx Web
 - [ ] Implement WebAssembly Component Model
 - [ ] Add AOT compilation mode
 
+### WASM4 Features (Fantasy Console)
+- [x] WASM4 memory map initialization
+- [x] WASM4 API function stubs
+- [x] Integration with runtime import handler
+- [ ] Complete framebuffer rendering
+- [ ] Implement drawing primitives (rect, line, oval, blit)
+- [ ] Text rendering with built-in font
+- [ ] Audio tone synthesis
+- [ ] Gamepad input handling
+- [ ] Mouse input handling
+- [ ] Persistent storage (disk I/O)
+- [ ] Frame-based execution model
+- [ ] Display output (SDL2 or terminal)
+
 ### Tooling
 - [ ] Create WASM validation tool
 - [ ] Add WASM disassembler

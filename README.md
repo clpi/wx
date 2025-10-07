@@ -4,9 +4,11 @@
 
 ### Introduction
 
-This repository contains `wx`, a WebAssembly runtime written in Zig with basic WASI support.
+This repository contains `wx`, a WebAssembly runtime written in Zig with basic WASI support and WASM4 fantasy console support.
 
-New: a WASI CLI workload `opcodes_cli.wasm` that exercises core WASM operations and can be run under `wx`, `wasmtime`, or `wasmer`. A simple benchmark harness is included.
+**New Features:**
+- **WASM4 Support**: Run WASM4 fantasy console games and applications! See [WASM4.md](WASM4.md) for details.
+- **WASI CLI**: `opcodes_cli.wasm` that exercises core WASM operations and can be run under `wx`, `wasmtime`, or `wasmer`. A simple benchmark harness is included.
 
 ### Installation
 
