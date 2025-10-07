@@ -44,77 +44,88 @@ pub fn setupModule(self: *WASI, _: *Runtime, module: *Module) !void {
 
 /// Write data to stdout
 pub fn fd_write(self: *WASI, fd: i32, iovs_ptr: i32, iovs_len: i32, written_ptr: i32, module: *Module) !i32 {
-    var o = Log.op("WASI", "fd_write");
+    // Fast path: validate fd early
     if (fd != 1 and fd != 2) {
-        o.log("  Invalid file descriptor: {d}\n", .{fd});
+        if (self.debug) {
+            var o = Log.op("WASI", "fd_write");
+            o.log("  Invalid file descriptor: {d}\n", .{fd});
+        }
         return -1; // Only support stdout and stderr
     }
 
     if (self.debug) {
+        var o = Log.op("WASI", "fd_write");
         o.log("\nWASI fd_write called: fd={d}, iovs_ptr={d}, iovs_len={d}, written_ptr={d}\n", .{ fd, iovs_ptr, iovs_len, written_ptr });
     }
 
     if (module.memory) |memory| {
-        var total_written: u32 = 0;
-        const stdout_file = std.fs.File{ .handle = 1 };
-        const stderr_file = std.fs.File{ .handle = 2 };
-
-        // Check if the iovs_ptr is valid
-        if (iovs_ptr < 0 or @as(usize, @intCast(iovs_ptr)) + (@as(usize, @intCast(iovs_len)) * 8) > memory.len) {
+        // Fast path: pre-select file handle to avoid repeated branching
+        const file = std.fs.File{ .handle = @intCast(fd) };
+        
+        // Fast validation: single bounds check for entire iovec array
+        const iovs_ptr_usize = @as(usize, @intCast(iovs_ptr));
+        const iovs_len_usize = @as(usize, @intCast(iovs_len));
+        const iovs_array_size = iovs_len_usize * 8;
+        
+        if (iovs_ptr < 0 or iovs_ptr_usize + iovs_array_size > memory.len) {
             if (self.debug) {
+                var o = Log.op("WASI", "fd_write");
                 o.log("  Invalid iovec array: ptr={d}, len={d}, memory_size={d}\n", .{ iovs_ptr, iovs_len, memory.len });
             }
-            return -1; // Invalid iovec array
+            return -1;
         }
 
-        // Read IOVs (I/O vectors)
-        for (0..@as(usize, @intCast(iovs_len))) |i| {
-            const iov_base_offset: usize = @as(usize, @intCast(iovs_ptr)) + (i * 8); // Each IOV is 8 bytes
+        var total_written: u32 = 0;
 
-            // Read the buffer pointer and length
+        // Optimized I/O vector processing loop
+        for (0..iovs_len_usize) |i| {
+            const iov_base_offset: usize = iovs_ptr_usize + (i * 8);
+
+            // Read buffer pointer and length (zero-copy)
             const buf_ptr = std.mem.readInt(u32, memory[iov_base_offset..][0..4], .little);
             const buf_len = std.mem.readInt(u32, memory[iov_base_offset + 4 ..][0..4], .little);
 
             if (self.debug) {
+                var o = Log.op("WASI", "fd_write");
                 o.log("  IOV[{d}]: buf_ptr={d}, buf_len={d}\n", .{ i, buf_ptr, buf_len });
             }
 
-            // Skip empty buffers
+            // Fast path: skip empty buffers early
             if (buf_len == 0) {
                 if (self.debug) {
+                    var o = Log.op("WASI", "fd_write");
                     o.log("  Empty buffer, skipping\n", .{});
                 }
                 continue;
             }
 
-            // Check buffer validity
-            if (@as(usize, @intCast(buf_ptr)) + buf_len > memory.len) {
+            // Fast bounds check
+            const buf_ptr_usize = @as(usize, @intCast(buf_ptr));
+            if (buf_ptr_usize + buf_len > memory.len) {
                 if (self.debug) {
+                    var o = Log.op("WASI", "fd_write");
                     o.log("  Invalid buffer: {d} + {d} > {d}\n", .{ buf_ptr, buf_len, memory.len });
                 }
-                return -1; // Invalid buffer
+                return -1;
             }
 
-            // Get the buffer data
-            const buffer = memory[buf_ptr .. buf_ptr + buf_len];
+            // Zero-copy buffer access
+            const buffer = memory[buf_ptr_usize .. buf_ptr_usize + buf_len];
 
             if (self.debug) {
-                // Print buffer contents (as hex for non-printable chars)
+                var o = Log.op("WASI", "fd_write");
                 o.log("  Buffer contents: \"", .{});
                 for (buffer) |byte| {
                     if (byte >= 32 and byte <= 126) {
-                        // Printable ASCII character
                         o.log("{c}", .{byte});
                     } else {
-                        // Non-printable character, show as hex
                         o.log("\\x{X:0>2}", .{byte});
                     }
                 }
                 o.log("\"\n", .{});
             }
 
-            // Write to stdout/stderr
-            const file = if (fd == 1) stdout_file else stderr_file;
+            // Direct write without branching (file already selected)
             _ = try file.writeAll(buffer);
 
             // Collect in buffer only when debugging
@@ -125,53 +136,56 @@ pub fn fd_write(self: *WASI, fd: i32, iovs_ptr: i32, iovs_len: i32, written_ptr:
             total_written += buf_len;
         }
 
-        // Flush the buffered writers
-        if (fd == 1) {} else {}
-
-        // Write the number of bytes written to written_ptr
+        // Write total bytes written to memory
         if (written_ptr >= 0 and @as(usize, @intCast(written_ptr)) + 4 <= memory.len) {
             std.mem.writeInt(u32, memory[@intCast(written_ptr)..][0..4], total_written, .little);
             if (self.debug) {
+                var o = Log.op("WASI", "fd_write");
                 o.log("  Wrote total_written={d} to written_ptr={d}\n", .{ total_written, written_ptr });
             }
         }
 
         if (self.debug) {
+            var o = Log.op("WASI", "fd_write");
             o.log("\nWASI fd_write result: {d}\n", .{0});
         }
 
-        return 0; // Success
+        return 0;
     } else {
-        return -1; // No memory available
+        return -1;
     }
 }
 
 /// Seek within a file descriptor
 pub fn fd_seek(self: *WASI, fd: i32, offset: i64, whence: i32, new_offset_ptr: i32, module: *Module) !i32 {
-    var o = Log.op("WASI", "fd_seek");
-    if (self.debug) {
-        o.log("\nWASI fd_seek: fd={d}, offset={d}, whence={d}, new_offset_ptr={d}\n", .{ fd, offset, whence, new_offset_ptr });
-    }
-
-    // Currently we only support seeking in stdout/stderr, which is a no-op
-    // but we'll return success and the current position (0)
+    // Fast path: validate fd early
     if (fd != 1 and fd != 2) {
         return -1; // Only support stdout and stderr for now
     }
 
+    if (self.debug) {
+        var o = Log.op("WASI", "fd_seek");
+        o.log("\nWASI fd_seek: fd={d}, offset={d}, whence={d}, new_offset_ptr={d}\n", .{ fd, offset, whence, new_offset_ptr });
+    }
+
     if (module.memory) |memory| {
-        // Write the new offset (always 0 for stdout/stderr)
-        if (new_offset_ptr >= 0 and @as(usize, @intCast(new_offset_ptr)) + 8 <= memory.len) {
-            std.mem.writeInt(i64, memory[@intCast(new_offset_ptr)..][0..8], 0, .little);
+        const ptr = @as(usize, @intCast(new_offset_ptr));
+        
+        // Fast validation and write (always 0 for stdout/stderr)
+        if (new_offset_ptr < 0 or ptr + 8 > memory.len) {
+            return -1;
         }
+        
+        std.mem.writeInt(i64, memory[ptr..][0..8], 0, .little);
 
         if (self.debug) {
+            var o = Log.op("WASI", "fd_seek");
             o.log("  Seek result: 0\n", .{});
         }
 
-        return 0; // Success
+        return 0;
     } else {
-        return -1; // No memory available
+        return -1;
     }
 }
 
@@ -239,18 +253,22 @@ pub fn setupArgs(self: *WASI, module: *Module) !struct { argc: i32, argv_ptr: i3
 /// Get environment variables count
 pub fn environ_sizes_get(_: *WASI, environ_count_ptr: i32, environ_buf_size_ptr: i32, module: *Module) !i32 {
     if (module.memory) |memory| {
-        // For now, we don't support environment variables
-        if (environ_count_ptr >= 0 and @as(usize, @intCast(environ_count_ptr)) + 4 <= memory.len) {
-            std.mem.writeInt(u32, memory[@intCast(environ_count_ptr)..][0..4], 0, .little);
+        // Fast path: validate both pointers at once
+        const count_ptr = @as(usize, @intCast(environ_count_ptr));
+        const size_ptr = @as(usize, @intCast(environ_buf_size_ptr));
+        
+        if (environ_count_ptr < 0 or count_ptr + 4 > memory.len or
+            environ_buf_size_ptr < 0 or size_ptr + 4 > memory.len) {
+            return -1;
         }
 
-        if (environ_buf_size_ptr >= 0 and @as(usize, @intCast(environ_buf_size_ptr)) + 4 <= memory.len) {
-            std.mem.writeInt(u32, memory[@intCast(environ_buf_size_ptr)..][0..4], 0, .little);
-        }
+        // Optimized: write zeros for both values (we don't support environment variables yet)
+        std.mem.writeInt(u32, memory[count_ptr..][0..4], 0, .little);
+        std.mem.writeInt(u32, memory[size_ptr..][0..4], 0, .little);
 
-        return 0; // Success
+        return 0;
     } else {
-        return -1; // No memory available
+        return -1;
     }
 }
 
@@ -262,41 +280,45 @@ pub fn environ_get(_: *WASI, _: i32, _: i32, _: *Module) !i32 {
 
 /// Get command-line arguments count
 pub fn args_sizes_get(self: *WASI, argc_ptr: i32, argv_buf_size_ptr: i32, module: *Module) !i32 {
-    var o = Log.op("WASI", "args_sizes_get");
     if (module.memory) |memory| {
-        // Write argc
-        if (argc_ptr >= 0 and @as(usize, @intCast(argc_ptr)) + 4 <= memory.len) {
-            std.mem.writeInt(u32, memory[@intCast(argc_ptr)..][0..4], @as(u32, @intCast(self.args.len)), .little);
+        // Fast path: validate pointers once
+        const argc_ptr_usize = @as(usize, @intCast(argc_ptr));
+        const argv_buf_size_ptr_usize = @as(usize, @intCast(argv_buf_size_ptr));
+        
+        if (argc_ptr < 0 or argc_ptr_usize + 4 > memory.len or
+            argv_buf_size_ptr < 0 or argv_buf_size_ptr_usize + 4 > memory.len) {
+            return -1;
         }
 
-        // Calculate total size needed for all arguments (including null terminators)
+        // Fast calculation: compute total size in single pass
         var total_size: u32 = 0;
         for (self.args) |arg| {
             total_size += @as(u32, @intCast(arg.len + 1)); // +1 for null terminator
         }
 
-        // Write argv_buf_size
-        if (argv_buf_size_ptr >= 0 and @as(usize, @intCast(argv_buf_size_ptr)) + 4 <= memory.len) {
-            std.mem.writeInt(u32, memory[@intCast(argv_buf_size_ptr)..][0..4], total_size, .little);
-        }
+        // Write both values (optimized for cache locality)
+        std.mem.writeInt(u32, memory[argc_ptr_usize..][0..4], @as(u32, @intCast(self.args.len)), .little);
+        std.mem.writeInt(u32, memory[argv_buf_size_ptr_usize..][0..4], total_size, .little);
 
         if (self.debug) {
+            var o = Log.op("WASI", "args_sizes_get");
             o.log("args_sizes_get: argc={d}, argv_buf_size={d}, argc_ptr={d}, argv_buf_size_ptr={d}\n", .{ self.args.len, total_size, argc_ptr, argv_buf_size_ptr });
         }
 
-        return 0; // Success
+        return 0;
     } else {
-        return -1; // No memory available
+        return -1;
     }
 }
 
 /// Get command-line arguments
 pub fn args_get(self: *WASI, argv_ptr: i32, argv_buf_ptr: i32, module: *Module) !i32 {
-    var o = Log.op("WASI", "args_get");
     if (module.memory) |memory| {
+        const argv_ptr_usize = @as(usize, @intCast(argv_ptr));
         var current_buf_ptr: u32 = @intCast(argv_buf_ptr);
 
         if (self.debug) {
+            var o = Log.op("WASI", "args_get");
             o.log("args_get: argv_ptr={d}, argv_buf_ptr={d}\n", .{ argv_ptr, argv_buf_ptr });
             o.log("  Memory size: {d} bytes\n", .{memory.len});
             o.log("  Arguments:\n", .{});
@@ -305,54 +327,55 @@ pub fn args_get(self: *WASI, argv_ptr: i32, argv_buf_ptr: i32, module: *Module) 
             }
         }
 
-        // Check if we have enough memory for the argv array
-        const argv_array_size = self.args.len * 4; // 4 bytes per pointer
-        if (@as(usize, @intCast(argv_ptr)) + argv_array_size > memory.len) {
-            o.log("  Error: Not enough memory for argv array: {d} + {d} > {d}\n", .{ argv_ptr, argv_array_size, memory.len });
-            return -1;
-        }
-
-        // Calculate total size needed for strings
-        var total_size: usize = 0;
+        // Fast bounds checking: validate entire argv array and buffer space
+        const argv_array_size = self.args.len * 4;
+        var total_string_size: usize = 0;
         for (self.args) |arg| {
-            total_size += arg.len + 1; // +1 for null terminator
+            total_string_size += arg.len + 1;
         }
 
-        // Check if we have enough memory for the strings
-        if (@as(usize, @intCast(argv_buf_ptr)) + total_size > memory.len) {
-            o.log("  Error: Not enough memory for argument strings: {d} + {d} > {d}\n", .{ argv_buf_ptr, total_size, memory.len });
+        if (argv_ptr_usize + argv_array_size > memory.len or
+            @as(usize, @intCast(argv_buf_ptr)) + total_string_size > memory.len) {
+            if (self.debug) {
+                var o = Log.op("WASI", "args_get");
+                o.log("  Error: Not enough memory\n", .{});
+            }
             return -1;
         }
 
-        // For each argument
+        // Optimized loop: write pointers and strings in single pass
         for (self.args, 0..) |arg, i| {
+            const arg_ptr_offset = argv_ptr_usize + (i * 4);
+            
             // Write pointer to argument string in argv array
-            const arg_ptr_offset = @as(usize, @intCast(argv_ptr)) + (i * 4);
             std.mem.writeInt(u32, memory[arg_ptr_offset..][0..4], current_buf_ptr, .little);
 
             if (self.debug) {
+                var o = Log.op("WASI", "args_get");
                 o.log("  Writing arg[{d}] pointer {d} at offset {d}\n", .{ i, current_buf_ptr, arg_ptr_offset });
             }
 
-            // Write argument string to buffer
-            @memcpy(memory[current_buf_ptr..][0..arg.len], arg);
-            memory[current_buf_ptr + arg.len] = 0; // Null terminator
+            // Write argument string to buffer (zero-copy from source)
+            const buf_start = @as(usize, @intCast(current_buf_ptr));
+            @memcpy(memory[buf_start..][0..arg.len], arg);
+            memory[buf_start + arg.len] = 0; // Null terminator
 
             if (self.debug) {
+                var o = Log.op("WASI", "args_get");
                 o.log("  Writing arg[{d}]=\"{s}\" at offset {d}\n", .{ i, arg, current_buf_ptr });
             }
 
-            // Update buffer pointer
             current_buf_ptr += @as(u32, @intCast(arg.len + 1));
         }
 
         if (self.debug) {
+            var o = Log.op("WASI", "args_get");
             o.log("args_get completed successfully\n", .{});
         }
 
-        return 0; // Success
+        return 0;
     } else {
-        return -1; // No memory available
+        return -1;
     }
 }
 
