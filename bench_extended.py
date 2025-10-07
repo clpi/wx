@@ -64,6 +64,8 @@ def format_comparison(wx_time, other_time, other_name):
 def main():
     print("🚀 Extended WebAssembly Runtime Benchmark Suite")
     print("=" * 80)
+    print("\nNote: This script expects benchmark files in the 'examples/' directory.")
+    print("Create the directory and add .wasm files to benchmark them.\n")
     
     # Test files
     benchmarks = [
