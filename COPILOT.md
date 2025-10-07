@@ -8,7 +8,7 @@ This file provides context and guidelines for GitHub Copilot when assisting with
 
 ## Key Technologies
 
-- **Language**: Zig (version 0.11.0+)
+- **Language**: Zig (version 0.15.1)
 - **Target**: WebAssembly (WASM) with WASI support
 - **Build System**: Zig build system (`build.zig`)
 - **Testing**: Zig's built-in test framework
