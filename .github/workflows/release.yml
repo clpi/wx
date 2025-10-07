@@ -1,0 +1,205 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-linux
+            artifact: wx-linux-x86_64
+          - os: macos-latest
+            target: x86_64-macos
+            artifact: wx-macos-x86_64
+          - os: macos-latest
+            target: aarch64-macos
+            artifact: wx-macos-aarch64
+          - os: windows-latest
+            target: x86_64-windows
+            artifact: wx-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.1"
+      - name: Build release binary
+        run: zig build -Doptimize=ReleaseFast
+      - name: Rename binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp ./zig-out/bin/wx.exe ./zig-out/bin/${{ matrix.artifact }}
+          else
+            cp ./zig-out/bin/wx ./zig-out/bin/${{ matrix.artifact }}
+          fi
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ./zig-out/bin/${{ matrix.artifact }}
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./zig-out/bin/${{ matrix.artifact }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  create-packages:
+    needs: build
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'release'
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Calculate SHA256 checksums
+        id: checksums
+        run: |
+          cd artifacts
+          echo "linux_sha256=$(sha256sum wx-linux-x86_64/wx-linux-x86_64 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "macos_x86_64_sha256=$(sha256sum wx-macos-x86_64/wx-macos-x86_64 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "macos_aarch64_sha256=$(sha256sum wx-macos-aarch64/wx-macos-aarch64 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "windows_sha256=$(sha256sum wx-windows-x86_64.exe/wx-windows-x86_64.exe | awk '{print $1}')" >> $GITHUB_OUTPUT
+      - name: Get version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      - name: Create Homebrew Formula
+        run: |
+          mkdir -p Formula
+          cat > Formula/wx.rb << 'EOF'
+          class Wx < Formula
+            desc "WebAssembly runtime written in Zig with basic WASI support"
+            homepage "https://github.com/clpi/wx"
+            version "${{ steps.version.outputs.version }}"
+            license "MIT"
+
+            if OS.mac? && Hardware::CPU.intel?
+              url "https://github.com/clpi/wx/releases/download/${{ steps.version.outputs.version }}/wx-macos-x86_64"
+              sha256 "${{ steps.checksums.outputs.macos_x86_64_sha256 }}"
+            elsif OS.mac? && Hardware::CPU.arm?
+              url "https://github.com/clpi/wx/releases/download/${{ steps.version.outputs.version }}/wx-macos-aarch64"
+              sha256 "${{ steps.checksums.outputs.macos_aarch64_sha256 }}"
+            elsif OS.linux?
+              url "https://github.com/clpi/wx/releases/download/${{ steps.version.outputs.version }}/wx-linux-x86_64"
+              sha256 "${{ steps.checksums.outputs.linux_sha256 }}"
+            end
+
+            def install
+              bin.install Dir["*"].first => "wx"
+            end
+
+            test do
+              system "#{bin}/wx", "--version"
+            end
+          end
+          EOF
+      - name: Create AUR PKGBUILD
+        run: |
+          cat > PKGBUILD << 'EOF'
+          # Maintainer: Your Name <your@email.com>
+          pkgname=wx-bin
+          pkgver=${{ steps.version.outputs.version }}
+          pkgrel=1
+          pkgdesc="WebAssembly runtime written in Zig with basic WASI support"
+          arch=('x86_64')
+          url="https://github.com/clpi/wx"
+          license=('MIT')
+          provides=('wx')
+          conflicts=('wx')
+          source=("https://github.com/clpi/wx/releases/download/${pkgver}/wx-linux-x86_64")
+          sha256sums=('${{ steps.checksums.outputs.linux_sha256 }}')
+
+          package() {
+            install -Dm755 "${srcdir}/wx-linux-x86_64" "${pkgdir}/usr/bin/wx"
+          }
+          EOF
+      - name: Create MacPorts Portfile
+        run: |
+          cat > Portfile << 'EOF'
+          # -*- coding: utf-8; mode: tcl; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- vim:fenc=utf-8:ft=tcl:et:sw=4:ts=4:sts=4
+
+          PortSystem          1.0
+
+          name                wx
+          version             ${{ steps.version.outputs.version }}
+          categories          devel
+          platforms           darwin linux
+          license             MIT
+          maintainers         nomaintainer
+          description         WebAssembly runtime written in Zig
+          long_description    wx is a WebAssembly runtime written in Zig with basic WASI support, \
+                              focused on performance and simplicity.
+
+          homepage            https://github.com/clpi/wx
+          master_sites        https://github.com/clpi/wx/releases/download/${version}/
+
+          if {${configure.build_arch} eq "arm64"} {
+              distfiles           wx-macos-aarch64
+              checksums           rmd160  SKIP \
+                                  sha256  ${{ steps.checksums.outputs.macos_aarch64_sha256 }} \
+                                  size    SKIP
+          } else {
+              distfiles           wx-macos-x86_64
+              checksums           rmd160  SKIP \
+                                  sha256  ${{ steps.checksums.outputs.macos_x86_64_sha256 }} \
+                                  size    SKIP
+          }
+
+          extract.only        
+
+          use_configure       no
+
+          build {}
+
+          destroot {
+              xinstall -m 755 ${distpath}/${distfiles} ${destroot}${prefix}/bin/wx
+          }
+          EOF
+      - name: Update Homebrew Cask
+        run: |
+          cat > wx.rb << 'EOF'
+          cask "wx" do
+            version "${{ steps.version.outputs.version }}"
+            
+            if Hardware::CPU.intel?
+              sha256 "${{ steps.checksums.outputs.macos_x86_64_sha256 }}"
+              url "https://github.com/clpi/wx/releases/download/#{version}/wx-macos-x86_64"
+            else
+              sha256 "${{ steps.checksums.outputs.macos_aarch64_sha256 }}"
+              url "https://github.com/clpi/wx/releases/download/#{version}/wx-macos-aarch64"
+            end
+
+            name "wx"
+            desc "WebAssembly runtime written in Zig with basic WASI support"
+            homepage "https://github.com/clpi/wx"
+
+            binary "wx-macos-#{Hardware::CPU.arch}", target: "wx"
+
+            livecheck do
+              url :url
+              strategy :github_latest
+            end
+          end
+          EOF
+      - name: Upload package files to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            Formula/wx.rb
+            PKGBUILD
+            Portfile
+            wx.rb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
