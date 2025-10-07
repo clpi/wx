@@ -10,6 +10,21 @@ New: a WASI CLI workload `opcodes_cli.wasm` that exercises core WASM operations 
 
 ### Installation
 
+#### Download Pre-built Binaries
+
+Download the latest release for your platform from the [releases page](https://github.com/clpi/wx/releases):
+
+- Linux: `wx-linux-x86_64`
+- macOS (Intel): `wx-macos-x86_64`
+- macOS (Apple Silicon): `wx-macos-aarch64`
+- Windows: `wx-windows-x86_64.exe`
+
+After downloading, make the binary executable (Linux/macOS):
+```bash
+chmod +x wx-*
+./wx-* --help
+```
+
 #### Using Docker
 
 Run the latest version using Docker:
