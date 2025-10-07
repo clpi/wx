@@ -10,6 +10,23 @@ New: a WASI CLI workload `opcodes_cli.wasm` that exercises core WASM operations 
 
 ### Installation
 
+#### Docker
+
+Pre-built Docker images are available on DockerHub and Quay.io:
+
+```bash
+# Pull from DockerHub
+docker pull clpi/wx:latest
+
+# Pull from Quay.io
+docker pull quay.io/clpi/wx:latest
+
+# Run a WASM file
+docker run -v $(pwd):/workspace clpi/wx your-file.wasm
+```
+
+#### Build from source
+
 Build the runtime:
 
 - `zig build` — build the `wx` binary

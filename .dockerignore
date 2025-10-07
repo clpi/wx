@@ -1,0 +1,42 @@
+# Git files
+.git
+.gitignore
+.gitmodules
+.github
+
+# Build artifacts
+zig-out
+zig-cache
+.zig-cache
+.zig-cache-global
+
+# Editor files
+.vscode
+.DS_Store
+.aider*
+.cursorrules
+.cursor/
+.claude/
+.gemini/
+
+# Documentation and metadata
+README.md
+TODO.md
+LICENSE
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+WARP.md
+.github/copilot-instructions.md
+
+# Benchmark files
+bench
+bench_extended.py
+
+# Examples (not needed in runtime)
+examples
+
+# Development files
+Makefile
+Brewfile
+flake.nix
