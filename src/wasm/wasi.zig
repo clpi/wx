@@ -11,18 +11,31 @@ allocator: std.mem.Allocator,
 args: [][:0]u8,
 stdout_buffer: std.ArrayList(u8),
 debug: bool = false,
+// Preopened directories (file descriptors 3+)
+preopens: std.ArrayList(Preopen),
+
+const Preopen = struct {
+    fd: i32,
+    path: []const u8,
+};
 
 pub fn init(allocator: std.mem.Allocator, args: [][:0]u8) !WASI {
+    var preopens = std.ArrayList(Preopen).init(allocator);
+    // Add default preopens: current directory as fd 3
+    try preopens.append(.{ .fd = 3, .path = "." });
+    
     return WASI{
         .allocator = allocator,
         .args = args,
         .stdout_buffer = try std.ArrayList(u8).initCapacity(allocator, 0),
         .debug = false,
+        .preopens = preopens,
     };
 }
 
 pub fn deinit(self: *WASI) void {
     self.stdout_buffer.deinit(self.allocator);
+    self.preopens.deinit();
 }
 
 /// Initialize the WASM module with WASI imports
@@ -360,4 +373,295 @@ pub fn args_get(self: *WASI, argv_ptr: i32, argv_buf_ptr: i32, module: *Module) 
 pub fn proc_exit(_: *WASI, exit_code: i32) !i32 {
     std.process.exit(@intCast(exit_code));
     return 0; // Never reached
+}
+
+/// Get the resolution of a clock (clock_res_get)
+pub fn clock_res_get(_: *WASI, clock_id: i32, resolution_ptr: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Return nanosecond resolution (1ns = 1)
+        const resolution: u64 = 1;
+        
+        if (resolution_ptr >= 0 and @as(usize, @intCast(resolution_ptr)) + 8 <= memory.len) {
+            std.mem.writeInt(u64, memory[@intCast(resolution_ptr)..][0..8], resolution, .little);
+        }
+        
+        _ = clock_id; // Ignore clock_id for now
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Get the time value of a clock (clock_time_get)
+pub fn clock_time_get(_: *WASI, clock_id: i32, precision: i64, time_ptr: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Get current time in nanoseconds
+        const timestamp = std.time.nanoTimestamp();
+        
+        if (time_ptr >= 0 and @as(usize, @intCast(time_ptr)) + 8 <= memory.len) {
+            std.mem.writeInt(u64, memory[@intCast(time_ptr)..][0..8], @intCast(timestamp), .little);
+        }
+        
+        _ = clock_id; // Ignore clock_id for now
+        _ = precision; // Ignore precision for now
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Close a file descriptor (fd_close)
+pub fn fd_close(_: *WASI, fd: i32) !i32 {
+    // For now, we only support stdout/stderr which shouldn't be closed
+    // Return success for any fd >= 3 (file descriptors)
+    if (fd >= 3) {
+        return 0; // Success
+    }
+    return -1; // Cannot close stdin/stdout/stderr
+}
+
+/// Read from a file descriptor (fd_read)
+pub fn fd_read(self: *WASI, fd: i32, iovs_ptr: i32, iovs_len: i32, nread_ptr: i32, module: *Module) !i32 {
+    var o = Log.op("WASI", "fd_read");
+    
+    if (self.debug) {
+        o.log("\nWASI fd_read: fd={d}, iovs_ptr={d}, iovs_len={d}, nread_ptr={d}\n", .{ fd, iovs_ptr, iovs_len, nread_ptr });
+    }
+    
+    if (module.memory) |memory| {
+        var total_read: u32 = 0;
+        
+        // Check if the iovs_ptr is valid
+        if (iovs_ptr < 0 or @as(usize, @intCast(iovs_ptr)) + (@as(usize, @intCast(iovs_len)) * 8) > memory.len) {
+            return -1; // Invalid iovec array
+        }
+        
+        // For stdin (fd=0), we'll return 0 bytes (EOF)
+        // For other fds, we also return 0 for now
+        if (fd == 0) {
+            // stdin - return EOF for now
+            total_read = 0;
+        } else {
+            // Other file descriptors not yet supported
+            total_read = 0;
+        }
+        
+        // Write the number of bytes read to nread_ptr
+        if (nread_ptr >= 0 and @as(usize, @intCast(nread_ptr)) + 4 <= memory.len) {
+            std.mem.writeInt(u32, memory[@intCast(nread_ptr)..][0..4], total_read, .little);
+        }
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Get information about a preopened directory (fd_prestat_get)
+pub fn fd_prestat_get(self: *WASI, fd: i32, prestat_ptr: i32, module: *Module) !i32 {
+    var o = Log.op("WASI", "fd_prestat_get");
+    
+    if (self.debug) {
+        o.log("\nWASI fd_prestat_get: fd={d}, prestat_ptr={d}\n", .{ fd, prestat_ptr });
+    }
+    
+    if (module.memory) |memory| {
+        // Check if this is a preopened directory
+        for (self.preopens.items) |preopen| {
+            if (preopen.fd == fd) {
+                // Write prestat structure:
+                // u8: tag (0 for dir)
+                // u32: path length
+                if (prestat_ptr >= 0 and @as(usize, @intCast(prestat_ptr)) + 8 <= memory.len) {
+                    memory[@intCast(prestat_ptr)] = 0; // tag = 0 (dir)
+                    std.mem.writeInt(u32, memory[@intCast(prestat_ptr) + 4 ..][0..4], @intCast(preopen.path.len), .little);
+                    
+                    if (self.debug) {
+                        o.log("  Found preopen fd={d}, path_len={d}\n", .{ fd, preopen.path.len });
+                    }
+                }
+                return 0; // Success
+            }
+        }
+        
+        // Not a preopened directory
+        return 8; // EBADF
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Get the path of a preopened directory (fd_prestat_dir_name)
+pub fn fd_prestat_dir_name(self: *WASI, fd: i32, path_ptr: i32, path_len: i32, module: *Module) !i32 {
+    var o = Log.op("WASI", "fd_prestat_dir_name");
+    
+    if (self.debug) {
+        o.log("\nWASI fd_prestat_dir_name: fd={d}, path_ptr={d}, path_len={d}\n", .{ fd, path_ptr, path_len });
+    }
+    
+    if (module.memory) |memory| {
+        // Find the preopened directory
+        for (self.preopens.items) |preopen| {
+            if (preopen.fd == fd) {
+                const copy_len = @min(@as(usize, @intCast(path_len)), preopen.path.len);
+                
+                if (path_ptr >= 0 and @as(usize, @intCast(path_ptr)) + copy_len <= memory.len) {
+                    @memcpy(memory[@intCast(path_ptr)..][0..copy_len], preopen.path[0..copy_len]);
+                    
+                    if (self.debug) {
+                        o.log("  Copied path: {s}\n", .{preopen.path});
+                    }
+                }
+                return 0; // Success
+            }
+        }
+        
+        // Not a preopened directory
+        return 8; // EBADF
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Get file descriptor attributes (fd_fdstat_get)
+pub fn fd_fdstat_get(_: *WASI, fd: i32, stat_ptr: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Write fdstat structure (24 bytes):
+        // u8: fs_filetype
+        // u16: fs_flags
+        // u64: fs_rights_base
+        // u64: fs_rights_inheriting
+        
+        if (stat_ptr >= 0 and @as(usize, @intCast(stat_ptr)) + 24 <= memory.len) {
+            const base: usize = @intCast(stat_ptr);
+            
+            // Set file type based on fd
+            if (fd >= 0 and fd <= 2) {
+                // stdin/stdout/stderr - character device
+                memory[base] = 2; // CHARACTER_DEVICE
+            } else {
+                // Other fds - assume directory
+                memory[base] = 3; // DIRECTORY
+            }
+            
+            // fs_flags (u16 at offset 2)
+            std.mem.writeInt(u16, memory[base + 2 ..][0..2], 0, .little);
+            
+            // fs_rights_base (u64 at offset 8) - all rights
+            std.mem.writeInt(u64, memory[base + 8 ..][0..8], 0xFFFFFFFF, .little);
+            
+            // fs_rights_inheriting (u64 at offset 16) - all rights
+            std.mem.writeInt(u64, memory[base + 16 ..][0..8], 0xFFFFFFFF, .little);
+        }
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Set file descriptor flags (fd_fdstat_set_flags)
+pub fn fd_fdstat_set_flags(_: *WASI, _: i32, _: i32) !i32 {
+    // Not implemented yet, return success
+    return 0;
+}
+
+/// Open a file or directory (path_open)
+pub fn path_open(_: *WASI, dirfd: i32, dirflags: i32, path_ptr: i32, path_len: i32, oflags: i32, fs_rights_base: i64, fs_rights_inheriting: i64, fdflags: i32, fd_ptr: i32, module: *Module) !i32 {
+    _ = dirfd;
+    _ = dirflags;
+    _ = oflags;
+    _ = fs_rights_base;
+    _ = fs_rights_inheriting;
+    _ = fdflags;
+    
+    if (module.memory) |memory| {
+        // For now, just fail all path_open operations
+        // A real implementation would open the file and assign an fd
+        _ = path_ptr;
+        _ = path_len;
+        _ = fd_ptr;
+        
+        return 28; // ENOSYS - not implemented
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Get file or directory metadata (path_filestat_get)
+pub fn path_filestat_get(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Remove a directory (path_remove_directory)
+pub fn path_remove_directory(_: *WASI, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Unlink a file (path_unlink_file)
+pub fn path_unlink_file(_: *WASI, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Get random bytes (random_get)
+pub fn random_get(_: *WASI, buf_ptr: i32, buf_len: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        if (buf_ptr >= 0 and @as(usize, @intCast(buf_ptr)) + @as(usize, @intCast(buf_len)) <= memory.len) {
+            const buffer = memory[@intCast(buf_ptr)..][0..@intCast(buf_len)];
+            
+            // Fill with random bytes
+            var prng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp()));
+            prng.random().bytes(buffer);
+        }
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Poll for events (poll_oneoff)
+pub fn poll_oneoff(_: *WASI, in_ptr: i32, out_ptr: i32, nsubscriptions: i32, nevents_ptr: i32, module: *Module) !i32 {
+    _ = in_ptr;
+    _ = out_ptr;
+    _ = nsubscriptions;
+    
+    if (module.memory) |memory| {
+        // For now, immediately return with 0 events
+        if (nevents_ptr >= 0 and @as(usize, @intCast(nevents_ptr)) + 4 <= memory.len) {
+            std.mem.writeInt(u32, memory[@intCast(nevents_ptr)..][0..4], 0, .little);
+        }
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Yield the processor (sched_yield)
+pub fn sched_yield(_: *WASI) !i32 {
+    // Give up CPU time slice
+    std.Thread.yield() catch {};
+    return 0; // Success
+}
+
+/// Receive a message from a socket (sock_recv)
+pub fn sock_recv(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Send a message on a socket (sock_send)
+pub fn sock_send(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Shut down socket send and receive channels (sock_shutdown)
+pub fn sock_shutdown(_: *WASI, _: i32, _: i32) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
 }

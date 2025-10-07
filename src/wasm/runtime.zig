@@ -1043,6 +1043,180 @@ pub fn handleImport(self: *Runtime, module_name: []const u8, field_name: []const
 
             const result = try self.wasi.?.proc_exit(exit_code);
             return Value{ .i32 = result };
+        } else if (std.mem.eql(u8, field_name, "clock_res_get")) {
+            if (args.len < 2) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const clock_id = args[0].i32;
+                const resolution_ptr = args[1].i32;
+
+                const result = try self.wasi.?.clock_res_get(clock_id, resolution_ptr, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "clock_time_get")) {
+            if (args.len < 3) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const clock_id = args[0].i32;
+                const precision = args[1].i64;
+                const time_ptr = args[2].i32;
+
+                const result = try self.wasi.?.clock_time_get(clock_id, precision, time_ptr, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "fd_close")) {
+            if (args.len < 1) return Error.TypeMismatch;
+            const fd = args[0].i32;
+
+            const result = try self.wasi.?.fd_close(fd);
+            return Value{ .i32 = result };
+        } else if (std.mem.eql(u8, field_name, "fd_read")) {
+            if (args.len < 4) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const fd = args[0].i32;
+                const iovs_ptr = args[1].i32;
+                const iovs_len = args[2].i32;
+                const nread_ptr = args[3].i32;
+
+                const result = try self.wasi.?.fd_read(fd, iovs_ptr, iovs_len, nread_ptr, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "fd_prestat_get")) {
+            if (args.len < 2) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const fd = args[0].i32;
+                const prestat_ptr = args[1].i32;
+
+                const result = try self.wasi.?.fd_prestat_get(fd, prestat_ptr, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "fd_prestat_dir_name")) {
+            if (args.len < 3) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const fd = args[0].i32;
+                const path_ptr = args[1].i32;
+                const path_len = args[2].i32;
+
+                const result = try self.wasi.?.fd_prestat_dir_name(fd, path_ptr, path_len, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "fd_fdstat_get")) {
+            if (args.len < 2) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const fd = args[0].i32;
+                const stat_ptr = args[1].i32;
+
+                const result = try self.wasi.?.fd_fdstat_get(fd, stat_ptr, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "fd_fdstat_set_flags")) {
+            if (args.len < 2) return Error.TypeMismatch;
+            const fd = args[0].i32;
+            const flags = args[1].i32;
+
+            const result = try self.wasi.?.fd_fdstat_set_flags(fd, flags);
+            return Value{ .i32 = result };
+        } else if (std.mem.eql(u8, field_name, "path_open")) {
+            if (args.len < 9) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const dirfd = args[0].i32;
+                const dirflags = args[1].i32;
+                const path_ptr = args[2].i32;
+                const path_len = args[3].i32;
+                const oflags = args[4].i32;
+                const fs_rights_base = args[5].i64;
+                const fs_rights_inheriting = args[6].i64;
+                const fdflags = args[7].i32;
+                const fd_ptr = args[8].i32;
+
+                const result = try self.wasi.?.path_open(dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, fd_ptr, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "path_filestat_get")) {
+            if (args.len < 5) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const fd = args[0].i32;
+                const flags = args[1].i32;
+                const path_ptr = args[2].i32;
+                const path_len = args[3].i32;
+                const buf_ptr = args[4].i32;
+
+                const result = try self.wasi.?.path_filestat_get(fd, flags, path_ptr, path_len, buf_ptr, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "path_remove_directory")) {
+            if (args.len < 3) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const fd = args[0].i32;
+                const path_ptr = args[1].i32;
+                const path_len = args[2].i32;
+
+                const result = try self.wasi.?.path_remove_directory(fd, path_ptr, path_len, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "path_unlink_file")) {
+            if (args.len < 3) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const fd = args[0].i32;
+                const path_ptr = args[1].i32;
+                const path_len = args[2].i32;
+
+                const result = try self.wasi.?.path_unlink_file(fd, path_ptr, path_len, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "random_get")) {
+            if (args.len < 2) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const buf_ptr = args[0].i32;
+                const buf_len = args[1].i32;
+
+                const result = try self.wasi.?.random_get(buf_ptr, buf_len, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "poll_oneoff")) {
+            if (args.len < 4) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const in_ptr = args[0].i32;
+                const out_ptr = args[1].i32;
+                const nsubscriptions = args[2].i32;
+                const nevents_ptr = args[3].i32;
+
+                const result = try self.wasi.?.poll_oneoff(in_ptr, out_ptr, nsubscriptions, nevents_ptr, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "sched_yield")) {
+            const result = try self.wasi.?.sched_yield();
+            return Value{ .i32 = result };
+        } else if (std.mem.eql(u8, field_name, "sock_recv")) {
+            if (args.len < 6) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const sock = args[0].i32;
+                const ri_data_ptr = args[1].i32;
+                const ri_data_len = args[2].i32;
+                const ri_flags = args[3].i32;
+                const ro_datalen_ptr = args[4].i32;
+                const ro_flags_ptr = args[5].i32;
+
+                const result = try self.wasi.?.sock_recv(sock, ri_data_ptr, ri_data_len, ri_flags, ro_datalen_ptr, ro_flags_ptr, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "sock_send")) {
+            if (args.len < 5) return Error.TypeMismatch;
+            if (self.module) |module| {
+                const sock = args[0].i32;
+                const si_data_ptr = args[1].i32;
+                const si_data_len = args[2].i32;
+                const si_flags = args[3].i32;
+                const so_datalen_ptr = args[4].i32;
+
+                const result = try self.wasi.?.sock_send(sock, si_data_ptr, si_data_len, si_flags, so_datalen_ptr, module);
+                return Value{ .i32 = result };
+            }
+        } else if (std.mem.eql(u8, field_name, "sock_shutdown")) {
+            if (args.len < 2) return Error.TypeMismatch;
+            const sock = args[0].i32;
+            const how = args[1].i32;
+
+            const result = try self.wasi.?.sock_shutdown(sock, how);
+            return Value{ .i32 = result };
         }
 
         Log.err("Unknown WASI import", "field_name").log(
