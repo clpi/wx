@@ -10,6 +10,30 @@ New: a WASI CLI workload `opcodes_cli.wasm` that exercises core WASM operations 
 
 ### Installation
 
+#### Using Docker
+
+Run the latest version using Docker:
+
+```bash
+# Pull the image from GitHub Container Registry
+docker pull ghcr.io/clpi/wx:main
+
+# Run a WASM file
+docker run --rm -v $(pwd):/wasm ghcr.io/clpi/wx:main /wasm/your-file.wasm
+
+# Show help
+docker run --rm ghcr.io/clpi/wx:main --help
+```
+
+Build your own Docker image:
+
+```bash
+docker build -t wx .
+docker run --rm wx --help
+```
+
+#### Building from Source
+
 Build the runtime:
 
 - `zig build` — build the `wx` binary
