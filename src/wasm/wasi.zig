@@ -665,3 +665,152 @@ pub fn sock_shutdown(_: *WASI, _: i32, _: i32) !i32 {
     // Not implemented yet
     return 28; // ENOSYS
 }
+
+/// Advise the system about how a file will be used (fd_advise)
+pub fn fd_advise(_: *WASI, _: i32, _: i64, _: i64, _: i32) !i32 {
+    // Not implemented, return success
+    return 0;
+}
+
+/// Force file data and metadata to disk (fd_sync)
+pub fn fd_sync(_: *WASI, _: i32) !i32 {
+    // Not implemented, return success
+    return 0;
+}
+
+/// Get file attributes (fd_filestat_get)
+pub fn fd_filestat_get(_: *WASI, fd: i32, buf_ptr: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Write filestat structure (64 bytes):
+        // u64: dev, u64: ino, u8: filetype, u64: nlink
+        // u64: size, u64: atim, u64: mtim, u64: ctim
+        
+        if (buf_ptr >= 0 and @as(usize, @intCast(buf_ptr)) + 64 <= memory.len) {
+            const base: usize = @intCast(buf_ptr);
+            
+            // dev (u64 at offset 0)
+            std.mem.writeInt(u64, memory[base..][0..8], 0, .little);
+            
+            // ino (u64 at offset 8)
+            std.mem.writeInt(u64, memory[base + 8 ..][0..8], 0, .little);
+            
+            // filetype (u8 at offset 16)
+            if (fd >= 0 and fd <= 2) {
+                memory[base + 16] = 2; // CHARACTER_DEVICE
+            } else {
+                memory[base + 16] = 3; // DIRECTORY
+            }
+            
+            // nlink (u64 at offset 24)
+            std.mem.writeInt(u64, memory[base + 24 ..][0..8], 1, .little);
+            
+            // size (u64 at offset 32)
+            std.mem.writeInt(u64, memory[base + 32 ..][0..8], 0, .little);
+            
+            // atim (u64 at offset 40)
+            std.mem.writeInt(u64, memory[base + 40 ..][0..8], 0, .little);
+            
+            // mtim (u64 at offset 48)
+            std.mem.writeInt(u64, memory[base + 48 ..][0..8], 0, .little);
+            
+            // ctim (u64 at offset 56)
+            std.mem.writeInt(u64, memory[base + 56 ..][0..8], 0, .little);
+        }
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Set file size (fd_filestat_set_size)
+pub fn fd_filestat_set_size(_: *WASI, _: i32, _: i64) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Set file timestamps (fd_filestat_set_times)
+pub fn fd_filestat_set_times(_: *WASI, _: i32, _: i64, _: i64, _: i32) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Read from a file descriptor with offset (fd_pread)
+pub fn fd_pread(_: *WASI, _: i32, _: i32, _: i32, _: i64, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Write to a file descriptor with offset (fd_pwrite)
+pub fn fd_pwrite(_: *WASI, _: i32, _: i32, _: i32, _: i64, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Read directory entries (fd_readdir)
+pub fn fd_readdir(_: *WASI, _: i32, _: i32, _: i32, _: i64, _: i32, _: *Module) !i32 {
+    // Not implemented yet - return 0 entries
+    return 0;
+}
+
+/// Atomically replace a file descriptor (fd_renumber)
+pub fn fd_renumber(_: *WASI, _: i32, _: i32) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Return current offset of a file descriptor (fd_tell)
+pub fn fd_tell(_: *WASI, fd: i32, offset_ptr: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Always return 0 for current offset
+        if (offset_ptr >= 0 and @as(usize, @intCast(offset_ptr)) + 8 <= memory.len) {
+            std.mem.writeInt(u64, memory[@intCast(offset_ptr)..][0..8], 0, .little);
+        }
+        _ = fd;
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
+}
+
+/// Allocate space in a file (fd_allocate)
+pub fn fd_allocate(_: *WASI, _: i32, _: i64, _: i64) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Create a directory (path_create_directory)
+pub fn path_create_directory(_: *WASI, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Create a hard link (path_link)
+pub fn path_link(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Read the contents of a symbolic link (path_readlink)
+pub fn path_readlink(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Rename a file or directory (path_rename)
+pub fn path_rename(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Create a symbolic link (path_symlink)
+pub fn path_symlink(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
+
+/// Accept a new incoming connection (sock_accept)
+pub fn sock_accept(_: *WASI, _: i32, _: i32, _: i32, _: *Module) !i32 {
+    // Not implemented yet
+    return 28; // ENOSYS
+}
