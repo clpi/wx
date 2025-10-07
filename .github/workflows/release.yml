@@ -31,21 +31,21 @@ jobs:
             target: aarch64-macos
             artifact_name: wx
             asset_name: wx-macos-aarch64
-    
+
     runs-on: ${{ matrix.os }}
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
-      
+
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: "0.15.1"
-      
+
       - name: Build wx
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
-      
+
       - name: Rename artifact
         shell: bash
         run: |
@@ -55,34 +55,40 @@ jobs:
             echo "Error: Binary not found at ./zig-out/bin/${{ matrix.artifact_name }}"
             exit 1
           fi
-      
+
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: ./${{ matrix.asset_name }}
           if-no-files-found: error
-  
+
   create-release:
     needs: build-release
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
-      
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./release-artifacts
-      
+
       - name: Display structure of downloaded files
         run: ls -R ./release-artifacts
-      
+
+      - name: Prepare release files
+        run: |
+          mkdir -p ./release-files
+          find ./release-artifacts -type f -exec cp {} ./release-files/ \;
+          ls -lh ./release-files/
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: ./release-artifacts/**/*
+          files: ./release-files/*
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
           generate_release_notes: true
