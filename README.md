@@ -104,18 +104,26 @@ wx --help
 
 ### Option 2: Using Docker
 
-Run wx using Docker (no installation needed):
+Run wx using Docker (no installation needed). Images are available from multiple registries:
 
 ```bash
-# Pull the image from GitHub Container Registry
-docker pull ghcr.io/clpi/wx:main
+# Pull from GitHub Container Registry (ghcr.io)
+docker pull ghcr.io/clpi/wx:latest
+
+# Or pull from Docker Hub (if credentials are configured)
+docker pull clpi/wx:latest
+
+# Or pull from Quay.io (if credentials are configured)
+docker pull quay.io/clpi/wx:latest
 
 # Run a WASM file
-docker run --rm -v $(pwd):/wasm ghcr.io/clpi/wx:main /wasm/your-file.wasm
+docker run --rm -v $(pwd):/wasm ghcr.io/clpi/wx:latest /wasm/your-file.wasm
 
 # Show help
-docker run --rm ghcr.io/clpi/wx:main --help
+docker run --rm ghcr.io/clpi/wx:latest --help
 ```
+
+**Multi-platform support:** Images are built for both `linux/amd64` and `linux/arm64` architectures.
 
 Or build your own Docker image:
 

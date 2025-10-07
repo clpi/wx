@@ -89,6 +89,13 @@ jobs:
           find ./release-artifacts -type f -exec cp {} ./release-files/ \;
           ls -lh ./release-files/
 
+      - name: Generate checksums
+        run: |
+          cd ./release-files
+          sha256sum * > checksums.txt
+          cat checksums.txt
+          cd ..
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -96,5 +103,24 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
           generate_release_notes: true
+          body: |
+            ## Installation
+
+            Download the appropriate binary for your platform and add it to your PATH.
+
+            ### Verification
+
+            You can verify the integrity of the downloaded files using the checksums provided in `checksums.txt`.
+
+            ```bash
+            sha256sum -c checksums.txt
+            ```
+
+            ### Docker Images
+
+            Container images are also available:
+            - GitHub Container Registry: `ghcr.io/${{ github.repository }}:${{ github.ref_name }}`
+            - Docker Hub: `clpi/wx:${{ github.ref_name }}`
+            - Quay.io: `quay.io/${{ github.repository_owner }}/wx:${{ github.ref_name }}`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
