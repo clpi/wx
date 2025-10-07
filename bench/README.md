@@ -1,6 +1,6 @@
 # 🚀 wx WebAssembly Runtime Benchmark Suite
 
-This directory contains comprehensive benchmarks and performance reports for the `wx` WebAssembly runtime, demonstrating its superior performance compared to industry-leading runtimes like Wasmer and Wasmtime.
+This directory contains benchmark scripts for testing the `wx` WebAssembly runtime and comparing its performance against industry-standard runtimes like Wasmer and Wasmtime.
 
 ## 📁 Directory Structure
 
