@@ -9,7 +9,6 @@
 AGENTS.md
 CLAUDE.md
 GEMINI.md
-.github/copilot-instructions.md
 WARP.md
 # Allow benchmark files but ignore generated artifacts
 bench/PERFORMANCE_REPORT.md
