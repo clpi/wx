@@ -11,9 +11,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - uses: mlugg/setup-zig@v2
+      - uses: goto-bus-stop/setup-zig@v2
         with:
-          version: "0.15.1"
+          version: 0.15.1
       - name: Run zig build
         run: zig build
       - name: Run tests
