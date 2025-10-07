@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-linux
+            artifact_name: wx
+            asset_name: wx-linux-x86_64
+          - os: windows-latest
+            target: x86_64-windows
+            artifact_name: wx.exe
+            asset_name: wx-windows-x86_64.exe
+          - os: macos-latest
+            target: x86_64-macos
+            artifact_name: wx
+            asset_name: wx-macos-x86_64
+          - os: macos-latest
+            target: aarch64-macos
+            artifact_name: wx
+            asset_name: wx-macos-aarch64
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.1"
+      
+      - name: Build wx
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
+      
+      - name: Rename artifact
+        shell: bash
+        run: |
+          if [ -f "./zig-out/bin/${{ matrix.artifact_name }}" ]; then
+            cp "./zig-out/bin/${{ matrix.artifact_name }}" "./${{ matrix.asset_name }}"
+          else
+            echo "Error: Binary not found at ./zig-out/bin/${{ matrix.artifact_name }}"
+            exit 1
+          fi
+      
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ./${{ matrix.asset_name }}
+          if-no-files-found: error
+  
+  create-release:
+    needs: build-release
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./release-artifacts
+      
+      - name: Display structure of downloaded files
+        run: ls -R ./release-artifacts
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./release-artifacts/**/*
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
