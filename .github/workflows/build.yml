@@ -19,4 +19,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wx-${{ matrix.os }}
-          path: ./zig-out/bin/wx
+          path: |
+            ./zig-out/bin/wx
+            ./zig-out/bin/wx.exe
