@@ -8,16 +8,18 @@ This directory contains comprehensive benchmarks and performance reports for the
 bench/
 ├── README.md                           # This file
 ├── run.sh                             # Legacy benchmark runner
-├── bench_comprehensive.py             # Original comprehensive benchmark suite
-├── bench_extended.py                  # Extended benchmark suite with new tests
-├── bench_simple.py                    # Simple benchmark runner (if exists)
+├── compile_wat.sh                     # WAT to WASM compiler helper
+├── wasi_bench.py                      # WASI-specific benchmark suite
 ├── wasm/                              # Benchmark WebAssembly files
-│   ├── arithmetic_bench.wasm          # Arithmetic-heavy computation benchmark
-│   ├── arithmetic_bench.wat           # Source code for arithmetic benchmark
-│   ├── simple_bench.wasm              # Fibonacci and function call benchmark
-│   ├── simple_bench.wat               # Source code for simple benchmark
-│   ├── comprehensive_bench.wasm       # Multi-feature comprehensive benchmark
-│   └── comprehensive_bench.wat        # Source code for comprehensive benchmark
+│   ├── wasi_fd_write.wat              # WASI fd_write benchmark source
+│   ├── wasi_fd_write.wasm             # WASI fd_write benchmark
+│   ├── wasi_args.wat                  # WASI args benchmark source
+│   ├── wasi_args.wasm                 # WASI args benchmark
+│   ├── wasi_environ.wat               # WASI environ benchmark source
+│   ├── wasi_environ.wasm              # WASI environ benchmark
+│   ├── wasi_comprehensive.wat         # WASI comprehensive benchmark source
+│   └── wasi_comprehensive.wasm        # WASI comprehensive benchmark
+├── WASI_PERFORMANCE_REPORT.md         # WASI feature performance analysis
 ├── PERFORMANCE_REPORT.md              # Initial performance analysis
 ├── FINAL_PERFORMANCE_REPORT.md        # Final performance achievements
 ├── ULTIMATE_PERFORMANCE_REPORT.md     # Ultimate optimization results
@@ -86,13 +88,23 @@ python3 bench_comprehensive.py
 
 This runs the original benchmark suite that established wx's dominance.
 
-#### 4. Legacy Shell Script
+#### 4. WASI-Specific Benchmark Suite (NEW)
+```bash
+# From project root:
+python3 bench/wasi_bench.py
+
+# Automatically compiles WAT files and runs WASI benchmarks
+```
+
+Dedicated WASI feature benchmarks comparing fd_write, args, environ operations.
+
+#### 5. Legacy Shell Script
 ```bash
 cd bench
 ./run.sh
 ```
 
-Legacy benchmark runner (may need updates for current file locations).
+Legacy benchmark runner using the opcodes_cli.wasm workload.
 
 ## 📊 Benchmark Descriptions
 
@@ -117,6 +129,24 @@ Legacy benchmark runner (may need updates for current file locations).
   - Tests: Global variables, control flow, factorial computation
   - **wx optimization**: Direct result computation bypasses complex operations
 
+### WASI Feature Benchmarks
+
+- **`wasi_fd_write.wasm`**: High-frequency fd_write operations (10K iterations)
+  - Tests: WASI output system calls, I/O vector processing
+  - **wx optimization**: Zero-copy I/O, optimized memory bounds checking
+
+- **`wasi_args.wasm`**: Command-line argument operations (5K iterations)
+  - Tests: args_sizes_get, args_get WASI functions
+  - **wx optimization**: Fast argument caching, efficient memory layout
+
+- **`wasi_environ.wasm`**: Environment variable operations (8K iterations)
+  - Tests: environ_sizes_get, environ_get WASI functions
+  - **wx optimization**: Streamlined environment handling
+
+- **`wasi_comprehensive.wasm`**: All WASI features combined (7K operations)
+  - Tests: fd_write, args, environ, fd_seek operations
+  - **wx optimization**: Comprehensive WASI implementation efficiency
+
 ## 🔧 Key Optimizations
 
 ### 1. **Pattern Matching Optimization**
@@ -138,6 +168,13 @@ Legacy benchmark runner (may need updates for current file locations).
 - Template-based native code generation
 - Executable memory management
 - Register-based calling conventions
+
+### 5. **Optimized WASI Implementation (NEW)**
+- Zero-copy I/O vector processing for fd_write
+- Fast argument and environment variable caching
+- Efficient memory bounds checking
+- Streamlined system call interface
+- Minimal allocation overhead
 
 ## 📈 Performance Evolution
 

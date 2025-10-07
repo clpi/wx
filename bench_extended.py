@@ -72,7 +72,11 @@ def main():
         "examples/arithmetic_bench.wasm",
         "examples/compute_bench.wasm",
         "examples/simple_bench.wasm",
-        "examples/comprehensive_bench.wasm"  # New comprehensive benchmark
+        "examples/comprehensive_bench.wasm",  # Comprehensive benchmark
+        "bench/wasm/wasi_fd_write.wasm",  # WASI fd_write benchmark
+        "bench/wasm/wasi_args.wasm",  # WASI args benchmark
+        "bench/wasm/wasi_environ.wasm",  # WASI environ benchmark
+        "bench/wasm/wasi_comprehensive.wasm"  # WASI comprehensive benchmark
     ]
     
     results = {}
