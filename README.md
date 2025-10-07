@@ -2,6 +2,10 @@
 
 > _`Webassembly` Zig runtime_
 
+[![Build](https://github.com/clpi/wx/actions/workflows/build.yml/badge.svg)](https://github.com/clpi/wx/actions/workflows/build.yml)
+[![Docker](https://github.com/clpi/wx/actions/workflows/docker.yml/badge.svg)](https://github.com/clpi/wx/actions/workflows/docker.yml)
+[![DockerHub](https://img.shields.io/docker/v/clpi/wx?label=dockerhub)](https://hub.docker.com/r/clpi/wx)
+
 ### Introduction
 
 This repository contains `wx`, a WebAssembly runtime written in Zig with basic WASI support.
