@@ -96,14 +96,17 @@ Compiling fibonacci.wasm:
 
 Run benchmarks yourself:
 ```bash
-# Quick benchmark comparison
+# Comprehensive benchmark suite (recommended)
+cd bench && python3 benchmark.py
+
+# Quick shell-based benchmark
 bash bench/run.sh
 
-# Extended benchmark suite
+# Legacy extended benchmark
 python3 bench_extended.py
 ```
 
-See [bench/README.md](bench/README.md) for detailed benchmarking information.
+See [bench/README.md](bench/README.md) for detailed benchmarking information and methodology.
 
 ## 📦 Installation
 
@@ -396,12 +399,17 @@ wx --aot examples/fibonacci.wasm -o fib.exe
 Compare wx against other runtimes:
 
 ```bash
-# Quick benchmark (requires wasmtime and/or wasmer installed)
+# Comprehensive benchmark suite (recommended)
+cd bench && python3 benchmark.py
+
+# Quick shell-based benchmark (requires wasmtime and/or wasmer)
 bash bench/run.sh
 
-# Extended benchmark suite with detailed analysis
+# Legacy extended benchmark suite
 python3 bench_extended.py
 ```
+
+All benchmark scripts gracefully handle missing runtimes (wasmer/wasmtime) and will test wx performance with whatever is available on your system.
 
 ## 🔄 Feature Parity Comparison
 

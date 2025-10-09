@@ -157,6 +157,25 @@ apt-cache search wx
 
 Make sure you use `sudo` for installation commands.
 
+## Verifying Performance
+
+After installation, you can benchmark wx against other runtimes:
+
+```bash
+# Install comparison runtimes (optional)
+curl https://get.wasmer.io -sSfL | sh
+curl https://wasmtime.dev/install.sh -sSfL | bash
+
+# Clone repository for benchmark files
+git clone https://github.com/clpi/wx.git
+cd wx/bench
+
+# Run comprehensive benchmarks
+python3 benchmark.py
+```
+
+See [BENCHMARKS.md](BENCHMARKS.md) for detailed performance information.
+
 ## Alternative Installation Methods
 
 If APT installation is not suitable, you can:
