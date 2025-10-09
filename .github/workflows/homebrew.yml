@@ -64,7 +64,7 @@ jobs:
             depends_on "zig" => :build
           
             def install
-              system "zig", "build", "-Doptimize=ReleaseFast"
+              system "zig", "build"
               bin.install "zig-out/bin/wx"
             end
           
@@ -90,7 +90,7 @@ jobs:
             depends_on "zig" => :build
           
             def install
-              system "zig", "build", "-Doptimize=ReleaseFast"
+              system "zig", "build"
               bin.install "zig-out/bin/wx"
             end
           

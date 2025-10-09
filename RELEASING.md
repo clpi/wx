@@ -97,7 +97,7 @@ Note: Manual runs without a tag will create a release with the commit SHA.
 If the build fails for a specific platform:
 
 1. Check the workflow logs
-2. Test locally with: `zig build -Dtarget=<target> -Doptimize=ReleaseFast`
+2. Test locally with: `zig build -Dtarget=<target>`
 3. Fix any platform-specific issues
 4. Delete the failed tag: `git tag -d v0.0.1 && git push origin :refs/tags/v0.0.1`
 5. Create a new tag after fixing

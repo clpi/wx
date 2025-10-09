@@ -50,7 +50,7 @@ parts:
       export PATH="$PWD/zig-linux-${ZIG_ARCH}-0.15.1:$PATH"
       
       # Build wx
-      zig build -Doptimize=ReleaseFast
+      zig build
       
       # Install binary
       mkdir -p $CRAFT_PART_INSTALL/bin
