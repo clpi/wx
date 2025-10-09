@@ -6,6 +6,7 @@ export const module = @import("wasm/module.zig");
 export const wasi = @import("wasm/wasi.zig");
 export const config = @import("cmd/config.zig");
 export const jit = @import("wasm/jit.zig");
+export const aot = @import("wasm/aot.zig");
 export const SmallVec = @import("wasm/stack.zig").SmallVec;
 export const testing = std.testing;
 export const fmt = @import("util/fmt.zig");
