@@ -68,22 +68,7 @@ To install the latest development version from the main branch:
 brew install --HEAD clpi/wx/wx
 ```
 
-## Creating a Homebrew Tap
+## Current Version
 
-To use this formula from a tap, you can create a Homebrew tap repository:
-
-1. Create a new repository named `homebrew-wx` (the `homebrew-` prefix is required)
-2. Copy the `Formula/wx.rb` file to the root of that repository
-3. Users can then install with: `brew tap clpi/wx && brew install wx`
-
-The formula is automatically updated when new releases are published via the Homebrew workflow.
-
-## Formula Details
-
-The wx Homebrew formula:
-- Installs the wx WebAssembly runtime
-- Automatically manages the Zig dependency
-- Builds from source for optimal performance
-- Includes a simple test to verify installation
-
-Current formula location: `Formula/wx.rb`
+Latest formula version: 0.1.0
+Release tag: 0.1.0
