@@ -54,6 +54,9 @@ jobs:
 
       - name: Create Debian package files
         run: |
+          # Create debian directory
+          mkdir -p debian
+          
           # Create debian/control
           cat > debian/control << 'EOF'
           Source: wx
