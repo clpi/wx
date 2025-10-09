@@ -1,0 +1,216 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to update formula for'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Get release information
+        id: release
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          
+          # Remove 'v' prefix if present
+          VERSION="${TAG#v}"
+          
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          
+          # Download the tarball to calculate SHA256
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          echo "tarball_url=${TARBALL_URL}" >> $GITHUB_OUTPUT
+          
+          curl -L "${TARBALL_URL}" -o release.tar.gz
+          SHA256=$(sha256sum release.tar.gz | cut -d' ' -f1)
+          echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
+          
+          echo "Tag: ${TAG}"
+          echo "Version: ${VERSION}"
+          echo "SHA256: ${SHA256}"
+
+      - name: Update Homebrew formula
+        run: |
+          cat > Formula/wx.rb << 'EOF'
+          class Wx < Formula
+            desc "High-performance WebAssembly runtime written in Zig"
+            homepage "https://github.com/clpi/wx"
+            url "${{ steps.release.outputs.tarball_url }}"
+            sha256 "${{ steps.release.outputs.sha256 }}"
+            license "MIT"
+            head "https://github.com/clpi/wx.git", branch: "main"
+          
+            depends_on "zig" => :build
+          
+            def install
+              system "zig", "build", "-Doptimize=ReleaseFast"
+              bin.install "zig-out/bin/wx"
+            end
+          
+            test do
+              assert_match "wx", shell_output("#{bin}/wx --help")
+            end
+          end
+          EOF
+          
+          cat Formula/wx.rb
+
+      - name: Update Brewfile
+        run: |
+          cat > Brewfile << 'EOF'
+          class Wx < Formula
+            desc "High-performance WebAssembly runtime written in Zig"
+            homepage "https://github.com/clpi/wx"
+            url "${{ steps.release.outputs.tarball_url }}"
+            sha256 "${{ steps.release.outputs.sha256 }}"
+            license "MIT"
+            head "https://github.com/clpi/wx.git", branch: "main"
+          
+            depends_on "zig" => :build
+          
+            def install
+              system "zig", "build", "-Doptimize=ReleaseFast"
+              bin.install "zig-out/bin/wx"
+            end
+          
+            test do
+              assert_match "wx", shell_output("#{bin}/wx --help")
+            end
+          end
+          
+          # vim: set ft=ruby:
+          EOF
+          
+          cat Brewfile
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add Formula/wx.rb Brewfile
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          git commit -m "Update Homebrew formula to ${{ steps.release.outputs.tag }}"
+          git push
+
+      - name: Create or update Homebrew tap instructions
+        run: |
+          cat > HOMEBREW.md << 'EOF'
+          # Homebrew Installation
+          
+          ## Installing wx via Homebrew
+          
+          ### Option 1: Install from this repository (Recommended)
+          
+          You can install wx directly from this repository:
+          
+          ```bash
+          brew install clpi/wx/wx
+          ```
+          
+          Or tap the repository first:
+          
+          ```bash
+          brew tap clpi/wx
+          brew install wx
+          ```
+          
+          ### Option 2: Install from local formula
+          
+          If you have cloned this repository, you can install from the local formula:
+          
+          ```bash
+          brew install --build-from-source ./Formula/wx.rb
+          ```
+          
+          Or from the Brewfile:
+          
+          ```bash
+          brew install --build-from-source ./Brewfile
+          ```
+          
+          ## Updating
+          
+          To update to the latest version:
+          
+          ```bash
+          brew update
+          brew upgrade wx
+          ```
+          
+          ## Uninstalling
+          
+          To uninstall wx:
+          
+          ```bash
+          brew uninstall wx
+          ```
+          
+          ## Requirements
+          
+          - Zig compiler (automatically installed as a dependency)
+          
+          ## Troubleshooting
+          
+          If you encounter issues:
+          
+          1. Update Homebrew: `brew update`
+          2. Check for conflicts: `brew doctor`
+          3. Try reinstalling: `brew reinstall wx`
+          
+          ## Using the head version
+          
+          To install the latest development version from the main branch:
+          
+          ```bash
+          brew install --HEAD clpi/wx/wx
+          ```
+          
+          ## Current Version
+          
+          Latest formula version: ${{ steps.release.outputs.version }}
+          Release tag: ${{ steps.release.outputs.tag }}
+          EOF
+          
+          cat HOMEBREW.md
+
+      - name: Commit Homebrew documentation
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add HOMEBREW.md
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          git commit -m "Update Homebrew installation documentation"
+          git push || echo "Nothing to push or push failed"

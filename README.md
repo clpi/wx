@@ -78,7 +78,29 @@ See [bench/README.md](bench/README.md) for detailed benchmarking information.
 
 ## 📦 Installation
 
-### Option 1: Download Pre-built Binaries
+### Option 1: Using Homebrew (macOS/Linux)
+
+The easiest way to install wx on macOS or Linux:
+
+```bash
+# Tap the repository
+brew tap clpi/wx
+
+# Install wx
+brew install wx
+
+# Verify installation
+wx --help
+```
+
+Or install directly without tapping:
+```bash
+brew install clpi/wx/wx
+```
+
+See [HOMEBREW.md](HOMEBREW.md) for more details.
+
+### Option 2: Download Pre-built Binaries
 
 Download the latest release for your platform from the [releases page](https://github.com/clpi/wx/releases):
 
@@ -102,7 +124,7 @@ sudo mv wx /usr/local/bin/
 wx --help
 ```
 
-### Option 2: Using Docker
+### Option 3: Using Docker
 
 Run wx using Docker (no installation needed). Images are available from multiple registries:
 
@@ -132,7 +154,7 @@ docker build -t wx .
 docker run --rm wx --help
 ```
 
-### Option 3: Building from Source
+### Option 4: Building from Source
 
 **Requirements:**
 - Zig compiler (version 0.15.1 or later) - [Installation guide](https://ziglang.org/download/)

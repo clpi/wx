@@ -17,5 +17,3 @@ class Wx < Formula
     assert_match "wx", shell_output("#{bin}/wx --help")
   end
 end
-
-# vim: set ft=ruby:
