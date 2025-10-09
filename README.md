@@ -132,7 +132,87 @@ For NixOS users, you can add wx to your system configuration:
 
 See [NIX.md](NIX.md) for more details.
 
-### Option 3: Download Pre-built Binaries
+### Option 3: Using Snap (Linux)
+
+Install wx on any Linux distribution using Snap:
+
+```bash
+# Install from stable channel
+sudo snap install wx
+
+# Or install from edge channel (pre-releases)
+sudo snap install wx --edge
+
+# Verify installation
+wx --help
+```
+
+See [SNAP.md](SNAP.md) for more details.
+
+### Option 4: Using APT (Debian/Ubuntu)
+
+Install wx on Debian-based systems:
+
+```bash
+# Download the .deb package from releases
+wget https://github.com/clpi/wx/releases/latest/download/wx_*_amd64.deb
+
+# Install the package
+sudo dpkg -i wx_*_amd64.deb
+sudo apt-get install -f
+
+# Verify installation
+wx --help
+```
+
+See [APT.md](APT.md) for more details.
+
+### Option 5: Using AUR (Arch Linux)
+
+Install wx on Arch Linux using your favorite AUR helper:
+
+```bash
+# Using yay
+yay -S wx
+
+# Using paru
+paru -S wx
+
+# Verify installation
+wx --help
+```
+
+See [AUR.md](AUR.md) for more details.
+
+### Option 6: Using Chocolatey (Windows)
+
+Install wx on Windows using Chocolatey:
+
+```powershell
+# Install wx
+choco install wx
+
+# Verify installation
+wx --help
+```
+
+See [CHOCOLATEY.md](CHOCOLATEY.md) for more details.
+
+### Option 7: Using Scoop (Windows)
+
+Install wx on Windows using Scoop:
+
+```powershell
+# Install from manifest
+scoop install https://raw.githubusercontent.com/clpi/wx/main/scoop/wx.json
+
+# Verify installation
+wx --help
+```
+
+See [SCOOP.md](SCOOP.md) for more details.
+
+### Option 8: Download Pre-built Binaries
 
 Download the latest release for your platform from the [releases page](https://github.com/clpi/wx/releases):
 
@@ -156,7 +236,7 @@ sudo mv wx /usr/local/bin/
 wx --help
 ```
 
-### Option 4: Using Docker
+### Option 9: Using Docker
 
 Run wx using Docker (no installation needed). Images are available from multiple registries:
 
@@ -186,7 +266,7 @@ docker build -t wx .
 docker run --rm wx --help
 ```
 
-### Option 5: Building from Source
+### Option 10: Building from Source
 
 **Requirements:**
 - Zig compiler (version 0.15.1 or later) - [Installation guide](https://ziglang.org/download/)

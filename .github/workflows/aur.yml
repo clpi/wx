@@ -1,0 +1,139 @@
+name: AUR
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to update AUR package for'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  update-aur:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Get release information
+        id: release
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          
+          # Remove 'v' prefix if present
+          VERSION="${TAG#v}"
+          
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          
+          # Calculate SHA256 for the source tarball
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          echo "tarball_url=${TARBALL_URL}" >> $GITHUB_OUTPUT
+          
+          curl -L "${TARBALL_URL}" -o release.tar.gz
+          SHA256=$(sha256sum release.tar.gz | cut -d' ' -f1)
+          echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
+          
+          echo "Tag: ${TAG}"
+          echo "Version: ${VERSION}"
+          echo "SHA256: ${SHA256}"
+
+      - name: Generate PKGBUILD
+        run: |
+          cat > PKGBUILD << 'EOF'
+          # Maintainer: clpi <clp@clp.is>
+          pkgname=wx
+          pkgver=${{ steps.release.outputs.version }}
+          pkgrel=1
+          pkgdesc="High-performance WebAssembly runtime written in Zig"
+          arch=('x86_64' 'aarch64')
+          url="https://github.com/clpi/wx"
+          license=('MIT')
+          depends=()
+          makedepends=('zig')
+          source=("$pkgname-$pkgver.tar.gz::${{ steps.release.outputs.tarball_url }}")
+          sha256sums=('${{ steps.release.outputs.sha256 }}')
+          
+          build() {
+            cd "$pkgname-$pkgver"
+            zig build -Doptimize=ReleaseFast
+          }
+          
+          check() {
+            cd "$pkgname-$pkgver"
+            ./zig-out/bin/wx --help
+          }
+          
+          package() {
+            cd "$pkgname-$pkgver"
+            install -Dm755 zig-out/bin/wx "$pkgdir/usr/bin/wx"
+            install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+            install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+          }
+          EOF
+          
+          cat PKGBUILD
+
+      - name: Generate .SRCINFO
+        run: |
+          cat > .SRCINFO << 'EOF'
+          pkgbase = wx
+          	pkgdesc = High-performance WebAssembly runtime written in Zig
+          	pkgver = ${{ steps.release.outputs.version }}
+          	pkgrel = 1
+          	url = https://github.com/clpi/wx
+          	arch = x86_64
+          	arch = aarch64
+          	license = MIT
+          	makedepends = zig
+          	source = wx-${{ steps.release.outputs.version }}.tar.gz::${{ steps.release.outputs.tarball_url }}
+          	sha256sums = ${{ steps.release.outputs.sha256 }}
+          
+          pkgname = wx
+          EOF
+          
+          cat .SRCINFO
+
+      - name: Publish to AUR
+        if: secrets.AUR_SSH_PRIVATE_KEY != ''
+        run: |
+          # Setup SSH for AUR
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
+          
+          # Configure git
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Clone AUR repository
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur" git clone ssh://aur@aur.archlinux.org/wx.git aur-repo
+          
+          # Update files
+          cp PKGBUILD aur-repo/
+          cp .SRCINFO aur-repo/
+          
+          # Commit and push
+          cd aur-repo
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to version ${{ steps.release.outputs.version }}"
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur" git push
+
+      - name: Upload PKGBUILD as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aur-package
+          path: |
+            PKGBUILD
+            .SRCINFO

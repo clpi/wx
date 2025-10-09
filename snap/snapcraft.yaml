@@ -1,0 +1,57 @@
+name: wx
+version: git
+summary: High-performance WebAssembly runtime written in Zig
+description: |
+  wx is a blazing-fast WebAssembly runtime written in Zig that outperforms 
+  industry-standard runtimes like Wasmer and Wasmtime through aggressive 
+  optimizations and efficient implementation.
+  
+  Features:
+  - 150+ WebAssembly opcodes implemented
+  - 40+ WASI syscalls for file I/O, networking, and more
+  - Pattern-matched hot paths for computational performance
+  - Zero-overhead dispatch with minimal interpreter overhead
+  - WASM4 fantasy console support
+
+base: core22
+confinement: strict
+grade: stable
+
+architectures:
+  - build-on: amd64
+  - build-on: arm64
+
+apps:
+  wx:
+    command: bin/wx
+    plugs:
+      - home
+      - network
+      - network-bind
+
+parts:
+  wx:
+    plugin: nil
+    source: .
+    build-packages:
+      - curl
+      - xz-utils
+      - ca-certificates
+    override-build: |
+      # Install Zig
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64) ZIG_ARCH="x86_64" ;;
+        arm64) ZIG_ARCH="aarch64" ;;
+        *) echo "Unsupported architecture"; exit 1 ;;
+      esac
+      
+      curl -L https://ziglang.org/download/0.15.1/zig-linux-${ZIG_ARCH}-0.15.1.tar.xz -o zig.tar.xz
+      tar -xf zig.tar.xz
+      export PATH="$PWD/zig-linux-${ZIG_ARCH}-0.15.1:$PATH"
+      
+      # Build wx
+      zig build -Doptimize=ReleaseFast
+      
+      # Install binary
+      mkdir -p $CRAFT_PART_INSTALL/bin
+      cp zig-out/bin/wx $CRAFT_PART_INSTALL/bin/
