@@ -17,3 +17,4 @@ bench/ULTIMATE_PERFORMANCE_REPORT.md
 bench/TOTAL_VICTORY_REPORT.md
 # Homebrew workflow artifacts
 release.tar.gz
+.wasm4_disk

@@ -79,13 +79,13 @@ This file tracks planned features, improvements, and known issues for the wx Web
 - [x] WASM4 memory map initialization
 - [x] WASM4 API function stubs
 - [x] Integration with runtime import handler
-- [ ] Complete framebuffer rendering
-- [ ] Implement drawing primitives (rect, line, oval, blit)
-- [ ] Text rendering with built-in font
-- [ ] Audio tone synthesis
+- [x] Complete framebuffer rendering
+- [x] Implement drawing primitives (rect, line, oval, blit)
+- [x] Text rendering with built-in font
+- [x] Audio tone synthesis (parameter parsing, needs platform audio output)
 - [ ] Gamepad input handling
 - [ ] Mouse input handling
-- [ ] Persistent storage (disk I/O)
+- [x] Persistent storage (disk I/O)
 - [ ] Frame-based execution model
 - [ ] Display output (SDL2 or terminal)
 
