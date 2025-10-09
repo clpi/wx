@@ -13,9 +13,18 @@ stdout_buffer: std.ArrayList(u8),
 debug: bool = false,
 // Preopened directories (file descriptors 3+)
 preopens: std.ArrayList(Preopen),
+// Open file descriptors (fd 4+, after preopens)
+open_files: std.ArrayList(OpenFile),
+next_fd: i32 = 4,
 
 const Preopen = struct {
     fd: i32,
+    path: []const u8,
+};
+
+const OpenFile = struct {
+    fd: i32,
+    file: std.fs.File,
     path: []const u8,
 };
 
@@ -31,12 +40,20 @@ pub fn init(allocator: std.mem.Allocator, args: [][:0]u8) !WASI {
         .stdout_buffer = try std.ArrayList(u8).initCapacity(allocator, 0),
         .debug = false,
         .preopens = preopens,
+        .open_files = std.ArrayList(OpenFile){},
+        .next_fd = 4,
     };
 }
 
 pub fn deinit(self: *WASI) void {
     self.stdout_buffer.deinit(self.allocator);
     self.preopens.deinit(self.allocator);
+    // Close all open files
+    for (self.open_files.items) |open_file| {
+        open_file.file.close();
+        self.allocator.free(open_file.path);
+    }
+    self.open_files.deinit(self.allocator);
 }
 
 /// Initialize the WASM module with WASI imports
@@ -568,43 +585,236 @@ pub fn fd_fdstat_set_flags(_: *WASI, _: i32, _: i32) !i32 {
 }
 
 /// Open a file or directory (path_open)
-pub fn path_open(_: *WASI, dirfd: i32, dirflags: i32, path_ptr: i32, path_len: i32, oflags: i32, fs_rights_base: i64, fs_rights_inheriting: i64, fdflags: i32, fd_ptr: i32, module: *Module) !i32 {
-    _ = dirfd;
+pub fn path_open(self: *WASI, dirfd: i32, dirflags: i32, path_ptr: i32, path_len: i32, oflags: i32, fs_rights_base: i64, fs_rights_inheriting: i64, fdflags: i32, fd_ptr: i32, module: *Module) !i32 {
     _ = dirflags;
-    _ = oflags;
     _ = fs_rights_base;
     _ = fs_rights_inheriting;
     _ = fdflags;
     
-    if (module.memory) |_| {
-        // For now, just fail all path_open operations
-        // A real implementation would open the file and assign an fd
-        _ = path_ptr;
-        _ = path_len;
-        _ = fd_ptr;
+    if (module.memory) |memory| {
+        // Validate path pointer
+        if (path_ptr < 0 or @as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
         
-        return 28; // ENOSYS - not implemented
+        const path = memory[@intCast(path_ptr)..@as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len))];
+        
+        // Find base directory path for dirfd
+        var base_path: []const u8 = ".";
+        if (dirfd >= 3) {
+            for (self.preopens.items) |preopen| {
+                if (preopen.fd == dirfd) {
+                    base_path = preopen.path;
+                    break;
+                }
+            }
+        }
+        
+        // Build full path
+        var full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ base_path, path }) catch return 63; // ENAMETOOLONG
+        
+        // Parse oflags - WASI oflags
+        // 0x01 = CREAT, 0x02 = DIRECTORY, 0x04 = EXCL, 0x08 = TRUNC
+        const flags = std.fs.File.OpenFlags{
+            .mode = if ((oflags & 0x01) != 0) .read_write else .read_only,
+        };
+        
+        // Try to open the file
+        const file = std.fs.cwd().openFile(full_path, flags) catch |err| {
+            return switch (err) {
+                error.FileNotFound => 44, // ENOENT
+                error.AccessDenied => 2, // EACCES
+                error.IsDir => 21, // EISDIR
+                error.NotDir => 54, // ENOTDIR
+                else => 28, // ENOSYS
+            };
+        };
+        
+        // Allocate new fd and store the file
+        const new_fd = self.next_fd;
+        self.next_fd += 1;
+        
+        const path_copy = try self.allocator.dupe(u8, full_path);
+        try self.open_files.append(self.allocator, .{
+            .fd = new_fd,
+            .file = file,
+            .path = path_copy,
+        });
+        
+        // Write the new fd to memory
+        if (fd_ptr >= 0 and @as(usize, @intCast(fd_ptr)) + 4 <= memory.len) {
+            std.mem.writeInt(u32, memory[@as(usize, @intCast(fd_ptr))..][0..4], @as(u32, @intCast(new_fd)), .little);
+        }
+        
+        return 0; // Success
     } else {
         return -1; // No memory available
     }
 }
 
 /// Get file or directory metadata (path_filestat_get)
-pub fn path_filestat_get(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
-    // Not implemented yet
-    return 28; // ENOSYS
+pub fn path_filestat_get(self: *WASI, dirfd: i32, flags: i32, path_ptr: i32, path_len: i32, buf_ptr: i32, module: *Module) !i32 {
+    _ = flags; // Flags for following symlinks
+    
+    if (module.memory) |memory| {
+        // Validate path pointer
+        if (path_ptr < 0 or @as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        
+        const path = memory[@intCast(path_ptr)..@as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len))];
+        
+        // Find base directory path for dirfd
+        var base_path: []const u8 = ".";
+        if (dirfd >= 3) {
+            for (self.preopens.items) |preopen| {
+                if (preopen.fd == dirfd) {
+                    base_path = preopen.path;
+                    break;
+                }
+            }
+        }
+        
+        // Build full path
+        var full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ base_path, path }) catch return 63; // ENAMETOOLONG
+        
+        // Get file stats
+        const file = std.fs.cwd().openFile(full_path, .{}) catch |err| {
+            return switch (err) {
+                error.FileNotFound => 44, // ENOENT
+                error.AccessDenied => 2, // EACCES
+                error.IsDir => {
+                    // For directories, try to open as dir
+                    var dir = std.fs.cwd().openDir(full_path, .{}) catch return 54; // ENOTDIR
+                    defer dir.close();
+                    
+                    // Write filestat structure for directory
+                    if (buf_ptr >= 0 and @as(usize, @intCast(buf_ptr)) + 64 <= memory.len) {
+                        const base_addr: usize = @intCast(buf_ptr);
+                        std.mem.writeInt(u64, memory[base_addr..][0..8], 0, .little); // dev
+                        std.mem.writeInt(u64, memory[base_addr + 8 ..][0..8], 0, .little); // ino
+                        memory[base_addr + 16] = 3; // DIRECTORY
+                        std.mem.writeInt(u64, memory[base_addr + 24 ..][0..8], 1, .little); // nlink
+                        std.mem.writeInt(u64, memory[base_addr + 32 ..][0..8], 0, .little); // size
+                        std.mem.writeInt(u64, memory[base_addr + 40 ..][0..8], 0, .little); // atim
+                        std.mem.writeInt(u64, memory[base_addr + 48 ..][0..8], 0, .little); // mtim
+                        std.mem.writeInt(u64, memory[base_addr + 56 ..][0..8], 0, .little); // ctim
+                    }
+                    return 0;
+                },
+                else => 28, // ENOSYS
+            };
+        };
+        defer file.close();
+        
+        const stat = file.stat() catch return 28;
+        
+        // Write filestat structure (64 bytes)
+        if (buf_ptr >= 0 and @as(usize, @intCast(buf_ptr)) + 64 <= memory.len) {
+            const base_addr: usize = @intCast(buf_ptr);
+            std.mem.writeInt(u64, memory[base_addr..][0..8], 0, .little); // dev
+            std.mem.writeInt(u64, memory[base_addr + 8 ..][0..8], stat.inode, .little); // ino
+            memory[base_addr + 16] = switch (stat.kind) {
+                .file => 4, // REGULAR_FILE
+                .directory => 3, // DIRECTORY
+                .sym_link => 7, // SYMBOLIC_LINK
+                else => 0, // UNKNOWN
+            };
+            std.mem.writeInt(u64, memory[base_addr + 24 ..][0..8], 1, .little); // nlink
+            std.mem.writeInt(u64, memory[base_addr + 32 ..][0..8], stat.size, .little); // size
+            std.mem.writeInt(u64, memory[base_addr + 40 ..][0..8], @intCast(stat.atime), .little); // atim
+            std.mem.writeInt(u64, memory[base_addr + 48 ..][0..8], @intCast(stat.mtime), .little); // mtim
+            std.mem.writeInt(u64, memory[base_addr + 56 ..][0..8], @intCast(stat.ctime), .little); // ctim
+        }
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
 }
 
 /// Remove a directory (path_remove_directory)
-pub fn path_remove_directory(_: *WASI, _: i32, _: i32, _: i32, _: *Module) !i32 {
-    // Not implemented yet
-    return 28; // ENOSYS
+pub fn path_remove_directory(self: *WASI, dirfd: i32, path_ptr: i32, path_len: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Validate path pointer
+        if (path_ptr < 0 or @as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        
+        const path = memory[@intCast(path_ptr)..@as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len))];
+        
+        // Find base directory path for dirfd
+        var base_path: []const u8 = ".";
+        if (dirfd >= 3) {
+            for (self.preopens.items) |preopen| {
+                if (preopen.fd == dirfd) {
+                    base_path = preopen.path;
+                    break;
+                }
+            }
+        }
+        
+        // Build full path
+        var full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ base_path, path }) catch return 63; // ENAMETOOLONG
+        
+        // Remove the directory
+        std.fs.cwd().deleteDir(full_path) catch |err| {
+            return switch (err) {
+                error.FileNotFound => 44, // ENOENT
+                error.AccessDenied => 2, // EACCES
+                error.DirNotEmpty => 66, // ENOTEMPTY
+                else => 28, // ENOSYS
+            };
+        };
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
 }
 
 /// Unlink a file (path_unlink_file)
-pub fn path_unlink_file(_: *WASI, _: i32, _: i32, _: i32, _: *Module) !i32 {
-    // Not implemented yet
-    return 28; // ENOSYS
+pub fn path_unlink_file(self: *WASI, dirfd: i32, path_ptr: i32, path_len: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Validate path pointer
+        if (path_ptr < 0 or @as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        
+        const path = memory[@intCast(path_ptr)..@as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len))];
+        
+        // Find base directory path for dirfd
+        var base_path: []const u8 = ".";
+        if (dirfd >= 3) {
+            for (self.preopens.items) |preopen| {
+                if (preopen.fd == dirfd) {
+                    base_path = preopen.path;
+                    break;
+                }
+            }
+        }
+        
+        // Build full path
+        var full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ base_path, path }) catch return 63; // ENAMETOOLONG
+        
+        // Delete the file
+        std.fs.cwd().deleteFile(full_path) catch |err| {
+            return switch (err) {
+                error.FileNotFound => 44, // ENOENT
+                error.AccessDenied => 2, // EACCES
+                error.IsDir => 21, // EISDIR
+                else => 28, // ENOSYS
+            };
+        };
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
 }
 
 /// Get random bytes (random_get)
@@ -737,15 +947,129 @@ pub fn fd_filestat_set_times(_: *WASI, _: i32, _: i64, _: i64, _: i32) !i32 {
 }
 
 /// Read from a file descriptor with offset (fd_pread)
-pub fn fd_pread(_: *WASI, _: i32, _: i32, _: i32, _: i64, _: i32, _: *Module) !i32 {
-    // Not implemented yet
-    return 28; // ENOSYS
+pub fn fd_pread(self: *WASI, fd: i32, iovs_ptr: i32, iovs_len: i32, offset: i64, nread_ptr: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Find the file descriptor
+        var file: ?std.fs.File = null;
+        for (self.open_files.items) |open_file| {
+            if (open_file.fd == fd) {
+                file = open_file.file;
+                break;
+            }
+        }
+        
+        if (file == null) {
+            return 8; // EBADF - bad file descriptor
+        }
+        
+        var total_read: u32 = 0;
+        
+        // Check if the iovs_ptr is valid
+        if (iovs_ptr < 0 or @as(usize, @intCast(iovs_ptr)) + (@as(usize, @intCast(iovs_len)) * 8) > memory.len) {
+            return 28; // EINVAL
+        }
+        
+        // Read IOVs (I/O vectors)
+        for (0..@as(usize, @intCast(iovs_len))) |i| {
+            const iov_base_offset: usize = @as(usize, @intCast(iovs_ptr)) + (i * 8);
+            
+            const buf_ptr = std.mem.readInt(u32, memory[iov_base_offset..][0..4], .little);
+            const buf_len = std.mem.readInt(u32, memory[iov_base_offset + 4 ..][0..4], .little);
+            
+            if (buf_len == 0) continue;
+            
+            // Check buffer validity
+            if (@as(usize, @intCast(buf_ptr)) + buf_len > memory.len) {
+                return 28; // EINVAL
+            }
+            
+            const buffer = memory[buf_ptr .. buf_ptr + buf_len];
+            
+            // Read from file at offset
+            const bytes_read = file.?.pread(buffer, @intCast(offset + total_read)) catch |err| {
+                return switch (err) {
+                    error.AccessDenied => 2, // EACCES
+                    error.InputOutput => 5, // EIO
+                    else => 28, // ENOSYS
+                };
+            };
+            
+            total_read += @intCast(bytes_read);
+            if (bytes_read < buf_len) break; // EOF or short read
+        }
+        
+        // Write the number of bytes read to nread_ptr
+        if (nread_ptr >= 0 and @as(usize, @intCast(nread_ptr)) + 4 <= memory.len) {
+            std.mem.writeInt(u32, memory[@intCast(nread_ptr)..][0..4], total_read, .little);
+        }
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
 }
 
 /// Write to a file descriptor with offset (fd_pwrite)
-pub fn fd_pwrite(_: *WASI, _: i32, _: i32, _: i32, _: i64, _: i32, _: *Module) !i32 {
-    // Not implemented yet
-    return 28; // ENOSYS
+pub fn fd_pwrite(self: *WASI, fd: i32, iovs_ptr: i32, iovs_len: i32, offset: i64, nwritten_ptr: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Find the file descriptor
+        var file: ?std.fs.File = null;
+        for (self.open_files.items) |open_file| {
+            if (open_file.fd == fd) {
+                file = open_file.file;
+                break;
+            }
+        }
+        
+        if (file == null) {
+            return 8; // EBADF - bad file descriptor
+        }
+        
+        var total_written: u32 = 0;
+        
+        // Check if the iovs_ptr is valid
+        if (iovs_ptr < 0 or @as(usize, @intCast(iovs_ptr)) + (@as(usize, @intCast(iovs_len)) * 8) > memory.len) {
+            return 28; // EINVAL
+        }
+        
+        // Write IOVs (I/O vectors)
+        for (0..@as(usize, @intCast(iovs_len))) |i| {
+            const iov_base_offset: usize = @as(usize, @intCast(iovs_ptr)) + (i * 8);
+            
+            const buf_ptr = std.mem.readInt(u32, memory[iov_base_offset..][0..4], .little);
+            const buf_len = std.mem.readInt(u32, memory[iov_base_offset + 4 ..][0..4], .little);
+            
+            if (buf_len == 0) continue;
+            
+            // Check buffer validity
+            if (@as(usize, @intCast(buf_ptr)) + buf_len > memory.len) {
+                return 28; // EINVAL
+            }
+            
+            const buffer = memory[buf_ptr .. buf_ptr + buf_len];
+            
+            // Write to file at offset
+            _ = file.?.pwrite(buffer, @intCast(offset + total_written)) catch |err| {
+                return switch (err) {
+                    error.AccessDenied => 2, // EACCES
+                    error.InputOutput => 5, // EIO
+                    error.NoSpaceLeft => 55, // ENOSPC
+                    else => 28, // ENOSYS
+                };
+            };
+            
+            total_written += buf_len;
+        }
+        
+        // Write the number of bytes written to nwritten_ptr
+        if (nwritten_ptr >= 0 and @as(usize, @intCast(nwritten_ptr)) + 4 <= memory.len) {
+            std.mem.writeInt(u32, memory[@intCast(nwritten_ptr)..][0..4], total_written, .little);
+        }
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
 }
 
 /// Read directory entries (fd_readdir)
@@ -781,33 +1105,231 @@ pub fn fd_allocate(_: *WASI, _: i32, _: i64, _: i64) !i32 {
 }
 
 /// Create a directory (path_create_directory)
-pub fn path_create_directory(_: *WASI, _: i32, _: i32, _: i32, _: *Module) !i32 {
-    // Not implemented yet
-    return 28; // ENOSYS
+pub fn path_create_directory(self: *WASI, dirfd: i32, path_ptr: i32, path_len: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Validate path pointer
+        if (path_ptr < 0 or @as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        
+        const path = memory[@intCast(path_ptr)..@as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len))];
+        
+        // Find base directory path for dirfd
+        var base_path: []const u8 = ".";
+        if (dirfd >= 3) {
+            for (self.preopens.items) |preopen| {
+                if (preopen.fd == dirfd) {
+                    base_path = preopen.path;
+                    break;
+                }
+            }
+        }
+        
+        // Build full path
+        var full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ base_path, path }) catch return 63; // ENAMETOOLONG
+        
+        // Create the directory
+        std.fs.cwd().makeDir(full_path) catch |err| {
+            return switch (err) {
+                error.PathAlreadyExists => 17, // EEXIST
+                error.AccessDenied => 2, // EACCES
+                error.NotDir => 54, // ENOTDIR
+                else => 28, // ENOSYS
+            };
+        };
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
 }
 
 /// Create a hard link (path_link)
-pub fn path_link(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
-    // Not implemented yet
-    return 28; // ENOSYS
+pub fn path_link(self: *WASI, old_fd: i32, old_flags: i32, old_path_ptr: i32, old_path_len: i32, new_fd: i32, new_path_ptr: i32, new_path_len: i32, module: *Module) !i32 {
+    _ = old_flags;
+    
+    if (module.memory) |memory| {
+        // Validate path pointers
+        if (old_path_ptr < 0 or @as(usize, @intCast(old_path_ptr)) + @as(usize, @intCast(old_path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        if (new_path_ptr < 0 or @as(usize, @intCast(new_path_ptr)) + @as(usize, @intCast(new_path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        
+        const old_path = memory[@intCast(old_path_ptr)..@as(usize, @intCast(old_path_ptr)) + @as(usize, @intCast(old_path_len))];
+        const new_path = memory[@intCast(new_path_ptr)..@as(usize, @intCast(new_path_ptr)) + @as(usize, @intCast(new_path_len))];
+        
+        // Find base directory paths
+        var old_base_path: []const u8 = ".";
+        var new_base_path: []const u8 = ".";
+        
+        for (self.preopens.items) |preopen| {
+            if (preopen.fd == old_fd) old_base_path = preopen.path;
+            if (preopen.fd == new_fd) new_base_path = preopen.path;
+        }
+        
+        // Build full paths
+        var old_full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        var new_full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const old_full_path = std.fmt.bufPrint(&old_full_path_buf, "{s}/{s}", .{ old_base_path, old_path }) catch return 63;
+        const new_full_path = std.fmt.bufPrint(&new_full_path_buf, "{s}/{s}", .{ new_base_path, new_path }) catch return 63;
+        
+        // Create hard link
+        std.posix.link(old_full_path, new_full_path) catch |err| {
+            return switch (err) {
+                error.FileNotFound => 44, // ENOENT
+                error.AccessDenied => 2, // EACCES
+                error.PathAlreadyExists => 17, // EEXIST
+                else => 28, // ENOSYS
+            };
+        };
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
 }
 
 /// Read the contents of a symbolic link (path_readlink)
-pub fn path_readlink(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
-    // Not implemented yet
-    return 28; // ENOSYS
+pub fn path_readlink(self: *WASI, dirfd: i32, path_ptr: i32, path_len: i32, buf_ptr: i32, buf_len: i32, bufused_ptr: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Validate path pointer
+        if (path_ptr < 0 or @as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        if (buf_ptr < 0 or @as(usize, @intCast(buf_ptr)) + @as(usize, @intCast(buf_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        
+        const path = memory[@intCast(path_ptr)..@as(usize, @intCast(path_ptr)) + @as(usize, @intCast(path_len))];
+        
+        // Find base directory path for dirfd
+        var base_path: []const u8 = ".";
+        if (dirfd >= 3) {
+            for (self.preopens.items) |preopen| {
+                if (preopen.fd == dirfd) {
+                    base_path = preopen.path;
+                    break;
+                }
+            }
+        }
+        
+        // Build full path
+        var full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ base_path, path }) catch return 63;
+        
+        // Read symlink
+        const buffer = memory[@intCast(buf_ptr)..@as(usize, @intCast(buf_ptr)) + @as(usize, @intCast(buf_len))];
+        const target = std.fs.cwd().readLink(full_path, buffer) catch |err| {
+            return switch (err) {
+                error.FileNotFound => 44, // ENOENT
+                error.AccessDenied => 2, // EACCES
+                error.NotLink => 22, // EINVAL
+                else => 28, // ENOSYS
+            };
+        };
+        
+        // Write bytes used
+        if (bufused_ptr >= 0 and @as(usize, @intCast(bufused_ptr)) + 4 <= memory.len) {
+            std.mem.writeInt(u32, memory[@intCast(bufused_ptr)..][0..4], @intCast(target.len), .little);
+        }
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
 }
 
 /// Rename a file or directory (path_rename)
-pub fn path_rename(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
-    // Not implemented yet
-    return 28; // ENOSYS
+pub fn path_rename(self: *WASI, old_fd: i32, old_path_ptr: i32, old_path_len: i32, new_fd: i32, new_path_ptr: i32, new_path_len: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Validate path pointers
+        if (old_path_ptr < 0 or @as(usize, @intCast(old_path_ptr)) + @as(usize, @intCast(old_path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        if (new_path_ptr < 0 or @as(usize, @intCast(new_path_ptr)) + @as(usize, @intCast(new_path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        
+        const old_path = memory[@intCast(old_path_ptr)..@as(usize, @intCast(old_path_ptr)) + @as(usize, @intCast(old_path_len))];
+        const new_path = memory[@intCast(new_path_ptr)..@as(usize, @intCast(new_path_ptr)) + @as(usize, @intCast(new_path_len))];
+        
+        // Find base directory paths
+        var old_base_path: []const u8 = ".";
+        var new_base_path: []const u8 = ".";
+        
+        for (self.preopens.items) |preopen| {
+            if (preopen.fd == old_fd) old_base_path = preopen.path;
+            if (preopen.fd == new_fd) new_base_path = preopen.path;
+        }
+        
+        // Build full paths
+        var old_full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        var new_full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const old_full_path = std.fmt.bufPrint(&old_full_path_buf, "{s}/{s}", .{ old_base_path, old_path }) catch return 63;
+        const new_full_path = std.fmt.bufPrint(&new_full_path_buf, "{s}/{s}", .{ new_base_path, new_path }) catch return 63;
+        
+        // Rename file/directory
+        std.fs.cwd().rename(old_full_path, new_full_path) catch |err| {
+            return switch (err) {
+                error.FileNotFound => 44, // ENOENT
+                error.AccessDenied => 2, // EACCES
+                error.NotDir => 54, // ENOTDIR
+                else => 28, // ENOSYS
+            };
+        };
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
 }
 
 /// Create a symbolic link (path_symlink)
-pub fn path_symlink(_: *WASI, _: i32, _: i32, _: i32, _: i32, _: i32, _: *Module) !i32 {
-    // Not implemented yet
-    return 28; // ENOSYS
+pub fn path_symlink(self: *WASI, old_path_ptr: i32, old_path_len: i32, dirfd: i32, new_path_ptr: i32, new_path_len: i32, module: *Module) !i32 {
+    if (module.memory) |memory| {
+        // Validate path pointers
+        if (old_path_ptr < 0 or @as(usize, @intCast(old_path_ptr)) + @as(usize, @intCast(old_path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        if (new_path_ptr < 0 or @as(usize, @intCast(new_path_ptr)) + @as(usize, @intCast(new_path_len)) > memory.len) {
+            return 28; // EINVAL
+        }
+        
+        const old_path = memory[@intCast(old_path_ptr)..@as(usize, @intCast(old_path_ptr)) + @as(usize, @intCast(old_path_len))];
+        const new_path = memory[@intCast(new_path_ptr)..@as(usize, @intCast(new_path_ptr)) + @as(usize, @intCast(new_path_len))];
+        
+        // Find base directory path for dirfd
+        var base_path: []const u8 = ".";
+        if (dirfd >= 3) {
+            for (self.preopens.items) |preopen| {
+                if (preopen.fd == dirfd) {
+                    base_path = preopen.path;
+                    break;
+                }
+            }
+        }
+        
+        // Build new full path
+        var new_full_path_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const new_full_path = std.fmt.bufPrint(&new_full_path_buf, "{s}/{s}", .{ base_path, new_path }) catch return 63;
+        
+        // Create symbolic link
+        std.fs.cwd().symLink(old_path, new_full_path, .{}) catch |err| {
+            return switch (err) {
+                error.FileNotFound => 44, // ENOENT
+                error.AccessDenied => 2, // EACCES
+                error.PathAlreadyExists => 17, // EEXIST
+                else => 28, // ENOSYS
+            };
+        };
+        
+        return 0; // Success
+    } else {
+        return -1; // No memory available
+    }
 }
 
 /// Accept a new incoming connection (sock_accept)
