@@ -18,12 +18,16 @@ fn printHelp(program_name: []const u8) void {
     print("  -h, --help      Show this help message\n", .{}, Color.white);
     print("  -d, --debug     Enable debug output\n", .{}, Color.white);
     print("  -j, --jit       Enable JIT compilation\n", .{}, Color.white);
+    print("  -a, --aot       Enable AOT (Ahead-of-Time) compilation\n", .{}, Color.white);
+    print("  -c, --compile   Alias for --aot\n", .{}, Color.white);
+    print("  -o, --output    Output file for AOT compilation\n", .{}, Color.white);
     print("  -v, --version   Show version information\n\n", .{}, Color.white);
 
     print("Examples:\n", .{}, Color.yellow);
     print("  {s} examples/hello.wasm\n", .{program_name}, Color.white);
     print("  {s} --debug examples/math.wasm\n", .{program_name}, Color.white);
     print("  {s} examples/fibonacci.wasm 10\n", .{program_name}, Color.white);
+    print("  {s} --aot examples/hello.wasm -o hello.exe\n", .{program_name}, Color.white);
 }
 
 fn printVersion() void {
@@ -104,7 +108,7 @@ pub fn main() !void {
     runtime.jit_enabled = cfg.jit;
 
     if (cfg.debug) {
-        std.debug.print("Config: debug={}, validate={}, jit={}\n", .{cfg.debug, cfg.validate, cfg.jit});
+        std.debug.print("Config: debug={}, validate={}, jit={}, aot={}\n", .{cfg.debug, cfg.validate, cfg.jit, cfg.aot});
         std.debug.print("Runtime: debug={}, validate={}, jit_enabled={}\n", .{runtime.debug, runtime.validate, runtime.jit_enabled});
     }
 
@@ -140,6 +144,34 @@ pub fn main() !void {
         }
     } else {
         module = try runtime.loadModule(wasm_bytes);
+    }
+
+    // Handle AOT compilation mode
+    if (cfg.aot) {
+        const AOT = @import("wasm/aot.zig").AOT;
+        var aot_compiler = try AOT.init(allocator, module);
+        defer aot_compiler.deinit();
+
+        if (cfg.debug) {
+            print("Starting AOT compilation...\n", .{}, Color.cyan);
+        }
+
+        const compiled = try aot_compiler.compileModule();
+        defer allocator.free(compiled.native_code);
+        defer allocator.free(compiled.function_table);
+
+        if (cfg.debug) {
+            print("AOT compilation complete. Generated {d} bytes of native code\n", .{compiled.native_code.len}, Color.green);
+        }
+
+        // Save to file if output specified
+        if (cfg.aot_output) |output_path| {
+            try aot_compiler.saveExecutable(compiled, output_path);
+            print("Native executable saved to: {s}\n", .{output_path}, Color.green);
+        } else {
+            print("AOT compilation successful. Use -o to save native executable.\n", .{}, Color.green);
+        }
+        return;
     }
 
     // Setup WASI with program arguments (skip the first two args: program name and wasm file)
