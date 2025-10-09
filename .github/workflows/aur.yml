@@ -105,7 +105,7 @@ jobs:
           cat .SRCINFO
 
       - name: Publish to AUR
-        if: secrets.AUR_SSH_PRIVATE_KEY != ''
+        if: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
         run: |
           # Setup SSH for AUR
           mkdir -p ~/.ssh

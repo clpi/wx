@@ -96,7 +96,7 @@ jobs:
           git push
 
       - name: Update Scoop bucket repository
-        if: secrets.SCOOP_BUCKET_TOKEN != ''
+        if: ${{ secrets.SCOOP_BUCKET_TOKEN != '' }}
         run: |
           # Clone the scoop bucket repository
           git clone https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/${{ github.repository_owner }}/scoop-bucket.git bucket

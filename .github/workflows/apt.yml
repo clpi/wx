@@ -155,7 +155,7 @@ jobs:
           path: ../*.deb
 
       - name: Create release asset from .deb
-        if: github.event_name == 'release'
+        if: ${{ github.event_name == 'release' }}
         uses: softprops/action-gh-release@v1
         with:
           files: ../*.deb

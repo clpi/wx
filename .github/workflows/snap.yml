@@ -34,7 +34,7 @@ jobs:
           path: '*.snap'
 
       - name: Publish to Snap Store
-        if: github.event_name == 'release' && !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc')
+        if: ${{ github.event_name == 'release' && !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc') }}
         uses: snapcore/action-publish@v1
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
@@ -43,7 +43,7 @@ jobs:
           release: stable
 
       - name: Publish to Snap Store (edge channel)
-        if: github.event_name == 'release' && (contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc'))
+        if: ${{ github.event_name == 'release' && (contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc')) }}
         uses: snapcore/action-publish@v1
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}

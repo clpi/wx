@@ -140,7 +140,7 @@ jobs:
           choco uninstall wx -y
 
       - name: Publish to Chocolatey
-        if: secrets.CHOCOLATEY_API_KEY != ''
+        if: ${{ secrets.CHOCOLATEY_API_KEY != '' }}
         shell: pwsh
         run: |
           choco push wx.${{ steps.release.outputs.version }}.nupkg --api-key ${{ secrets.CHOCOLATEY_API_KEY }} --source https://push.chocolatey.org/
