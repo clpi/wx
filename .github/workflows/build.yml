@@ -3,6 +3,23 @@ name: Build
 on: [push, pull_request]
 
 jobs:
+  validate-workflows:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate workflow files
+        run: |
+          python3 -c "import yaml; import sys; import glob
+          failed = False
+          for f in glob.glob('.github/workflows/*.yml'):
+              try:
+                  yaml.safe_load(open(f))
+                  print(f'✓ {f}')
+              except Exception as e:
+                  print(f'✗ {f}: {e}')
+                  failed = True
+          sys.exit(1 if failed else 0)"
+
   build:
     strategy:
       fail-fast: false
