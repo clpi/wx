@@ -20,9 +20,10 @@ const Preopen = struct {
 };
 
 pub fn init(allocator: std.mem.Allocator, args: [][:0]u8) !WASI {
-    var preopens = std.ArrayList(Preopen).init(allocator);
+    var preopens = std.ArrayList(Preopen){};
+    errdefer preopens.deinit(allocator);
     // Add default preopens: current directory as fd 3
-    try preopens.append(.{ .fd = 3, .path = "." });
+    try preopens.append(allocator, .{ .fd = 3, .path = "." });
     
     return WASI{
         .allocator = allocator,
@@ -35,7 +36,7 @@ pub fn init(allocator: std.mem.Allocator, args: [][:0]u8) !WASI {
 
 pub fn deinit(self: *WASI) void {
     self.stdout_buffer.deinit(self.allocator);
-    self.preopens.deinit();
+    self.preopens.deinit(self.allocator);
 }
 
 /// Initialize the WASM module with WASI imports
@@ -474,7 +475,7 @@ pub fn fd_prestat_get(self: *WASI, fd: i32, prestat_ptr: i32, module: *Module) !
                 // u32: path length
                 if (prestat_ptr >= 0 and @as(usize, @intCast(prestat_ptr)) + 8 <= memory.len) {
                     memory[@intCast(prestat_ptr)] = 0; // tag = 0 (dir)
-                    std.mem.writeInt(u32, memory[@intCast(prestat_ptr) + 4 ..][0..4], @intCast(preopen.path.len), .little);
+                    std.mem.writeInt(u32, memory[@as(usize, @intCast(prestat_ptr)) + 4 ..][0..4], @as(u32, @intCast(preopen.path.len)), .little);
                     
                     if (self.debug) {
                         o.log("  Found preopen fd={d}, path_len={d}\n", .{ fd, preopen.path.len });
@@ -575,7 +576,7 @@ pub fn path_open(_: *WASI, dirfd: i32, dirflags: i32, path_ptr: i32, path_len: i
     _ = fs_rights_inheriting;
     _ = fdflags;
     
-    if (module.memory) |memory| {
+    if (module.memory) |_| {
         // For now, just fail all path_open operations
         // A real implementation would open the file and assign an fd
         _ = path_ptr;

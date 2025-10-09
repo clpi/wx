@@ -167,8 +167,6 @@ fn blit(self: *WASM4, args: []const Value, module: *Module) !Value {
 
         // TODO: Implement actual blitting to framebuffer
         // For now, just validate and return
-        _ = x;
-        _ = y;
     }
 
     return .{ .i32 = 0 };
@@ -195,7 +193,6 @@ fn blitSub(self: *WASM4, args: []const Value, module: *Module) !Value {
     }
 
     _ = module;
-    _ = sprite_ptr;
     // TODO: Implement blitSub
     return .{ .i32 = 0 };
 }
@@ -322,8 +319,6 @@ fn text(self: *WASM4, args: []const Value, module: *Module) !Value {
         }
     }
 
-    _ = x;
-    _ = y;
     // TODO: Implement text drawing
     return .{ .i32 = 0 };
 }
@@ -360,8 +355,6 @@ fn diskr(self: *WASM4, args: []const Value, module: *Module) !Value {
     }
 
     _ = module;
-    _ = dest_ptr;
-    _ = size;
     // TODO: Implement disk read
     // For now, return 0 (no bytes read)
     return .{ .i32 = 0 };
@@ -380,8 +373,6 @@ fn diskw(self: *WASM4, args: []const Value, module: *Module) !Value {
     }
 
     _ = module;
-    _ = src_ptr;
-    _ = size;
     // TODO: Implement disk write
     // For now, return the size (pretend all bytes were written)
     return .{ .i32 = @intCast(size) };
@@ -407,7 +398,7 @@ fn trace(self: *WASM4, args: []const Value, module: *Module) !Value {
                 o.log("[TRACE] {s}\n", .{text_slice});
                 
                 // Also write to stdout
-                const stdout = std.io.getStdOut();
+                const stdout = std.fs.File.stdout();
                 try stdout.writeAll("[WASM4 TRACE] ");
                 try stdout.writeAll(text_slice);
                 try stdout.writeAll("\n");
@@ -432,8 +423,6 @@ fn tracef(self: *WASM4, args: []const Value, module: *Module) !Value {
     }
 
     _ = module;
-    _ = format_ptr;
-    _ = args_ptr;
     // TODO: Implement formatted trace
     return .{ .i32 = 0 };
 }
