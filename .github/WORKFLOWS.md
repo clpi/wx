@@ -71,6 +71,22 @@ This document describes the GitHub Actions workflows used in the wx project and 
 
 **Output**: Benchmark results uploaded as artifacts
 
+### 5. Homebrew Formula Update Workflow (homebrew.yml)
+
+**Triggers**: Release published, Manual dispatch
+
+**Purpose**: Automatically updates the Homebrew formula when a new release is published.
+
+**Actions**:
+- Downloads the release tarball
+- Calculates SHA256 checksum
+- Updates Formula/wx.rb with new version and checksum
+- Updates Brewfile to match
+- Commits and pushes changes to main branch
+- Creates/updates HOMEBREW.md documentation
+
+**Manual Trigger**: Can be run manually with a specific release tag
+
 ## Workflow Validation
 
 ### Automated Validation
@@ -148,10 +164,23 @@ To configure secrets:
 ### When Updating Zig Version
 
 Update the Zig version in all workflows:
-- `.github/workflows/build.yml` (line 16)
+- `.github/workflows/build.yml` (line 33)
 - `.github/workflows/release.yml` (line 44)
 - `.github/workflows/benchmark.yml` (line 21)
 - `Dockerfile` (line 18)
+
+### When Creating a New Release
+
+The Homebrew formula will be automatically updated when you:
+1. Create and push a version tag (e.g., `v0.1.0`)
+2. The release workflow builds the binaries
+3. The homebrew workflow updates the formula with the new version and SHA256
+
+To manually update the formula for a specific release:
+1. Go to Actions → Update Homebrew Formula
+2. Click "Run workflow"
+3. Enter the release tag (e.g., `v0.1.0`)
+4. Click "Run workflow"
 
 ### When Adding New Platforms
 

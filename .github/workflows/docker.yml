@@ -42,7 +42,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME != null && secrets.DOCKERHUB_TOKEN != null
+        if: github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != ''
         continue-on-error: true
         uses: docker/login-action@v3
         with:
@@ -50,7 +50,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Log in to Quay.io
-        if: github.event_name != 'pull_request' && secrets.QUAY_USERNAME != null && secrets.QUAY_TOKEN != null
+        if: github.event_name != 'pull_request' && secrets.QUAY_USERNAME != '' && secrets.QUAY_TOKEN != ''
         continue-on-error: true
         uses: docker/login-action@v3
         with:
