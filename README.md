@@ -100,7 +100,39 @@ brew install clpi/wx/wx
 
 See [HOMEBREW.md](HOMEBREW.md) for more details.
 
-### Option 2: Download Pre-built Binaries
+### Option 2: Using Nix (NixOS/Linux/macOS)
+
+If you have Nix with flakes enabled, you can install wx directly:
+
+```bash
+# Run wx directly without installing
+nix run github:clpi/wx
+
+# Install to your profile
+nix profile install github:clpi/wx
+
+# Enter a development shell with wx available
+nix develop github:clpi/wx
+
+# Build from the flake
+nix build github:clpi/wx
+./result/bin/wx --help
+```
+
+For NixOS users, you can add wx to your system configuration:
+
+```nix
+{
+  inputs.wx.url = "github:clpi/wx";
+  
+  # In your configuration
+  environment.systemPackages = [ inputs.wx.packages.${system}.default ];
+}
+```
+
+See [NIX.md](NIX.md) for more details.
+
+### Option 3: Download Pre-built Binaries
 
 Download the latest release for your platform from the [releases page](https://github.com/clpi/wx/releases):
 
@@ -124,7 +156,7 @@ sudo mv wx /usr/local/bin/
 wx --help
 ```
 
-### Option 3: Using Docker
+### Option 4: Using Docker
 
 Run wx using Docker (no installation needed). Images are available from multiple registries:
 
@@ -154,7 +186,7 @@ docker build -t wx .
 docker run --rm wx --help
 ```
 
-### Option 4: Building from Source
+### Option 5: Building from Source
 
 **Requirements:**
 - Zig compiler (version 0.15.1 or later) - [Installation guide](https://ziglang.org/download/)
@@ -269,6 +301,8 @@ bash bench/run.sh
 - [Benchmarking Guide](bench/README.md) - Performance testing
 - [Contributing Guide](CONTRIBUTING.md) - Development guidelines
 - [Changelog](CHANGELOG.md) - Version history
+- [Homebrew Installation](HOMEBREW.md) - Homebrew installation guide
+- [Nix Installation](NIX.md) - Nix/NixOS installation guide
 
 ## 🎯 Project Goals
 
