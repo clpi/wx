@@ -292,6 +292,8 @@ wx --aot --debug examples/math.wasm -o math.exe
 - **Template-based compilation**: Uses optimized code templates for common patterns
 - **Zero overhead**: Eliminates interpreter completely
 
+📖 **See [AOT.md](AOT.md) for comprehensive AOT compilation documentation, benchmarks, and technical details.**
+
 ### Examples
 
 ```bash
