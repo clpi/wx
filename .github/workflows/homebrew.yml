@@ -214,3 +214,25 @@ jobs:
           
           git commit -m "Update Homebrew installation documentation"
           git push || echo "Nothing to push or push failed"
+
+  test-formula:
+    needs: update-formula
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Test Homebrew formula
+        run: |
+          # Test that the formula is valid
+          brew install --build-from-source --verbose ./Formula/wx.rb
+          
+          # Verify the binary works
+          wx --help
+          wx --version || true
+          
+          # Clean up
+          brew uninstall wx
