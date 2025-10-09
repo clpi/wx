@@ -1,0 +1,163 @@
+name: APT/Debian
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build Debian package for'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            debhelper \
+            devscripts \
+            build-essential \
+            curl \
+            xz-utils
+
+      - name: Install Zig
+        run: |
+          curl -L https://ziglang.org/download/0.15.1/zig-linux-x86_64-0.15.1.tar.xz -o zig.tar.xz
+          tar -xf zig.tar.xz
+          sudo mv zig-linux-x86_64-0.15.1 /usr/local/zig
+          echo "/usr/local/zig" >> $GITHUB_PATH
+
+      - name: Get version information
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Create Debian package files
+        run: |
+          # Create debian/control
+          cat > debian/control << 'EOF'
+          Source: wx
+          Section: utils
+          Priority: optional
+          Maintainer: clpi <clp@clp.is>
+          Build-Depends: debhelper (>= 11), curl, xz-utils
+          Standards-Version: 4.5.1
+          Homepage: https://github.com/clpi/wx
+          
+          Package: wx
+          Architecture: amd64 arm64
+          Depends: ${shlibs:Depends}, ${misc:Depends}
+          Description: High-performance WebAssembly runtime written in Zig
+           wx is a blazing-fast WebAssembly runtime written in Zig that outperforms
+           industry-standard runtimes like Wasmer and Wasmtime through aggressive
+           optimizations and efficient implementation.
+           .
+           Features:
+            - 150+ WebAssembly opcodes implemented
+            - 40+ WASI syscalls for file I/O, networking, and more
+            - Pattern-matched hot paths for computational performance
+            - Zero-overhead dispatch with minimal interpreter overhead
+            - WASM4 fantasy console support
+          EOF
+          
+          # Create debian/rules
+          cat > debian/rules << 'EOF'
+          #!/usr/bin/make -f
+          
+          %:
+          	dh $@
+          
+          override_dh_auto_build:
+          	zig build -Doptimize=ReleaseFast
+          
+          override_dh_auto_install:
+          	mkdir -p debian/wx/usr/bin
+          	cp zig-out/bin/wx debian/wx/usr/bin/
+          EOF
+          
+          chmod +x debian/rules
+          
+          # Create debian/changelog
+          cat > debian/changelog << EOF
+          wx (${{ steps.version.outputs.version }}-1) unstable; urgency=medium
+          
+            * New release ${{ steps.version.outputs.version }}
+          
+           -- GitHub Actions <github-actions[bot]@users.noreply.github.com>  $(date -R)
+          EOF
+          
+          # Create debian/compat
+          echo "11" > debian/compat
+          
+          # Create debian/copyright
+          cat > debian/copyright << 'EOF'
+          Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+          Upstream-Name: wx
+          Upstream-Contact: clpi <clp@clp.is>
+          Source: https://github.com/clpi/wx
+          
+          Files: *
+          Copyright: 2024 clpi
+          License: MIT
+          
+          License: MIT
+           Permission is hereby granted, free of charge, to any person obtaining a
+           copy of this software and associated documentation files (the "Software"),
+           to deal in the Software without restriction, including without limitation
+           the rights to use, copy, modify, merge, publish, distribute, sublicense,
+           and/or sell copies of the Software, and to permit persons to whom the
+           Software is furnished to do so, subject to the following conditions:
+           .
+           The above copyright notice and this permission notice shall be included
+           in all copies or substantial portions of the Software.
+           .
+           THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+           OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+           FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+           THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+           LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+           FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+           DEALINGS IN THE SOFTWARE.
+          EOF
+
+      - name: Build Debian package
+        run: |
+          dpkg-buildpackage -us -uc -b
+
+      - name: List built packages
+        run: |
+          ls -lh ../*.deb
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-package
+          path: ../*.deb
+
+      - name: Create release asset from .deb
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ../*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,152 @@
+name: Chocolatey
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build Chocolatey package for'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Get release information
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          
+          # Remove 'v' prefix if present
+          VERSION="${TAG#v}"
+          
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          
+          # Get binary URL from release
+          BINARY_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/wx-windows-x86_64.exe"
+          echo "binary_url=${BINARY_URL}" >> $GITHUB_OUTPUT
+          
+          echo "Tag: ${TAG}"
+          echo "Version: ${VERSION}"
+          echo "Binary URL: ${BINARY_URL}"
+
+      - name: Download binary and calculate checksum
+        shell: pwsh
+        run: |
+          $url = "${{ steps.release.outputs.binary_url }}"
+          Invoke-WebRequest -Uri $url -OutFile wx.exe
+          $checksum = (Get-FileHash wx.exe -Algorithm SHA256).Hash
+          echo "CHECKSUM=$checksum" >> $env:GITHUB_OUTPUT
+          echo "Checksum: $checksum"
+        id: checksum
+
+      - name: Create Chocolatey package files
+        shell: pwsh
+        run: |
+          # Create chocolatey directory structure
+          New-Item -ItemType Directory -Force -Path chocolatey/tools
+          
+          # Create nuspec file
+          $nuspec = @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+            <metadata>
+              <id>wx</id>
+              <version>${{ steps.release.outputs.version }}</version>
+              <title>wx</title>
+              <authors>clpi</authors>
+              <projectUrl>https://github.com/clpi/wx</projectUrl>
+              <licenseUrl>https://github.com/clpi/wx/blob/main/LICENSE</licenseUrl>
+              <requireLicenseAcceptance>false</requireLicenseAcceptance>
+              <projectSourceUrl>https://github.com/clpi/wx</projectSourceUrl>
+              <docsUrl>https://github.com/clpi/wx#readme</docsUrl>
+              <bugTrackerUrl>https://github.com/clpi/wx/issues</bugTrackerUrl>
+              <tags>wasm webassembly runtime zig wasi</tags>
+              <summary>High-performance WebAssembly runtime written in Zig</summary>
+              <description>
+          wx is a blazing-fast WebAssembly runtime written in Zig that outperforms industry-standard runtimes like Wasmer and Wasmtime through aggressive optimizations and efficient implementation.
+          
+          Features:
+          - 150+ WebAssembly opcodes implemented
+          - 40+ WASI syscalls for file I/O, networking, and more
+          - Pattern-matched hot paths for computational performance
+          - Zero-overhead dispatch with minimal interpreter overhead
+          - WASM4 fantasy console support
+              </description>
+            </metadata>
+            <files>
+              <file src="tools\**" target="tools" />
+            </files>
+          </package>
+          "@
+          $nuspec | Out-File -FilePath chocolatey/wx.nuspec -Encoding utf8
+          
+          # Create install script
+          $install = @"
+          `$ErrorActionPreference = 'Stop'
+          `$packageName = 'wx'
+          `$url64 = '${{ steps.release.outputs.binary_url }}'
+          `$checksum64 = '${{ steps.checksum.outputs.CHECKSUM }}'
+          `$checksumType64 = 'sha256'
+          
+          `$installPath = Join-Path `$env:ChocolateyInstall 'bin'
+          
+          Get-ChocolateyWebFile `$packageName `
+            -Url64bit `$url64 `
+            -Checksum64 `$checksum64 `
+            -ChecksumType64 `$checksumType64 `
+            -FileFullPath (Join-Path `$installPath 'wx.exe')
+          "@
+          $install | Out-File -FilePath chocolatey/tools/chocolateyinstall.ps1 -Encoding utf8
+          
+          # Create uninstall script
+          $uninstall = @"
+          `$ErrorActionPreference = 'Stop'
+          `$packageName = 'wx'
+          `$installPath = Join-Path `$env:ChocolateyInstall 'bin'
+          `$exePath = Join-Path `$installPath 'wx.exe'
+          
+          if (Test-Path `$exePath) {
+            Remove-Item `$exePath -Force
+          }
+          "@
+          $uninstall | Out-File -FilePath chocolatey/tools/chocolateyuninstall.ps1 -Encoding utf8
+
+      - name: Build Chocolatey package
+        shell: pwsh
+        run: |
+          choco pack chocolatey/wx.nuspec --outputdirectory .
+
+      - name: Test Chocolatey package
+        shell: pwsh
+        run: |
+          choco install wx -s . -y
+          wx --help
+          choco uninstall wx -y
+
+      - name: Publish to Chocolatey
+        if: secrets.CHOCOLATEY_API_KEY != ''
+        shell: pwsh
+        run: |
+          choco push wx.${{ steps.release.outputs.version }}.nupkg --api-key ${{ secrets.CHOCOLATEY_API_KEY }} --source https://push.chocolatey.org/
+
+      - name: Upload Chocolatey package
+        uses: actions/upload-artifact@v4
+        with:
+          name: chocolatey-package
+          path: '*.nupkg'

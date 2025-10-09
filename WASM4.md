@@ -178,18 +178,19 @@ See `examples/wasm4_hello.wat` for a complete example.
 - ✅ Import function stubs for all WASM4 API functions
 - ✅ Integration with runtime import handler
 - ✅ Debug tracing support
-
-### In Progress
-- 🚧 Framebuffer rendering
-- 🚧 Drawing primitives (rect, line, oval, etc.)
-- 🚧 Sprite blitting
-- 🚧 Text rendering with built-in font
+- ✅ Framebuffer rendering (2bpp, 160x160)
+- ✅ Drawing primitives (rect, line, hline, vline, oval)
+- ✅ Sprite blitting (blit, blitSub) with 1BPP/2BPP support
+- ✅ Sprite transformations (FLIP_X, FLIP_Y, ROTATE)
+- ✅ Text rendering with built-in 8x8 font (ASCII 32-127)
+- ✅ Audio tone parameter parsing (ADSR envelope, frequency slides)
+- ✅ Persistent storage (diskr, diskw via filesystem)
+- ✅ Debug functions (trace, tracef)
 
 ### Planned
-- ⏳ Audio synthesis
+- ⏳ Audio synthesis output (requires platform audio driver)
 - ⏳ Gamepad input handling
 - ⏳ Mouse input handling
-- ⏳ Persistent storage (disk I/O)
 - ⏳ Frame-based execution model
 - ⏳ Display output (SDL2/terminal)
 
