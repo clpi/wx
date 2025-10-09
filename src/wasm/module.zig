@@ -435,7 +435,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !*Module {
                     // Add to exports
                     try module.exports.append(allocator, .{
                         .name = name_copy,
-                        .kind = @import("module/Export.zig").Type.fromByte(kind),
+                        .kind = @import("module/export.zig").Type.fromByte(kind),
                         .index = index,
                     });
 

@@ -829,7 +829,7 @@ fn trace(self: *WASM4, args: []const Value, module: *Module) !Value {
                 o.log("[TRACE] {s}\n", .{text_slice});
                 
                 // Also write to stdout
-                const stdout = std.io.getStdOut();
+                const stdout = std.fs.File.stdout();
                 try stdout.writeAll("[WASM4 TRACE] ");
                 try stdout.writeAll(text_slice);
                 try stdout.writeAll("\n");

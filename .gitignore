@@ -3,6 +3,9 @@
 .zig-out
 .zig-cache
 .zig-cache-global
+/test
+/test[0-9]
+/test[0-9][0-9]
 .claude/
 .cursor/
 .gemini/
