@@ -25,7 +25,7 @@
 
           buildPhase = ''
             export HOME=$TMPDIR
-            zig build -Doptimize=ReleaseFast
+            zig build
           '';
 
           installPhase = ''

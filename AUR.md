@@ -100,7 +100,7 @@ git clone https://github.com/clpi/wx.git
 cd wx
 
 # Build
-zig build -Doptimize=ReleaseFast
+zig build
 
 # Install manually
 sudo cp zig-out/bin/wx /usr/local/bin/

@@ -148,7 +148,7 @@ git clone https://github.com/clpi/wx.git
 cd wx
 
 # Build
-zig build -Doptimize=ReleaseFast
+zig build
 
 # The binary will be at zig-out\bin\wx.exe
 ```

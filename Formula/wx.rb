@@ -9,7 +9,7 @@ class Wx < Formula
   depends_on "zig" => :build
 
   def install
-    system "zig", "build", "-Doptimize=ReleaseFast"
+    system "zig", "build"
     bin.install "zig-out/bin/wx"
   end
 

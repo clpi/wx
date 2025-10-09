@@ -166,7 +166,7 @@ If APT installation is not suitable, you can:
    sudo apt-get install zig
    git clone https://github.com/clpi/wx.git
    cd wx
-   zig build -Doptimize=ReleaseFast
+   zig build
    sudo cp zig-out/bin/wx /usr/local/bin/
    ```
 

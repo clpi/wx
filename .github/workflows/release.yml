@@ -44,7 +44,7 @@ jobs:
           version: 0.15.1
 
       - name: Build wx
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
+        run: zig build -Dtarget=${{ matrix.target }}
 
       - name: Rename artifact
         shell: bash
