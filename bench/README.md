@@ -7,15 +7,20 @@ This directory contains benchmark scripts for testing the `wx` WebAssembly runti
 ```
 bench/
 ├── README.md                           # This file
-└── run.sh                              # Benchmark runner script
+├── run.sh                              # Shell-based benchmark runner
+├── benchmark.py                        # Python comprehensive benchmark suite
+└── wasm/                               # Benchmark WASM files
+    ├── arithmetic_bench.wasm           # Arithmetic operations benchmark
+    ├── comprehensive_bench.wasm        # Multi-feature benchmark
+    ├── compute_bench.wasm              # Computational workload
+    ├── simple_bench.wasm               # Simple operations
+    └── opcode_test_simple.wasm         # Opcode testing
 
-../bench_extended.py                    # Extended benchmark suite (in project root)
+../bench_extended.py                    # Legacy extended benchmark suite
 ../zig-out/bin/
 ├── wx                                  # Built wx runtime binary
 └── opcodes_cli.wasm                    # WASI CLI workload for benchmarking
 ```
-
-**Note**: Benchmark WASM files referenced in this README (e.g., `arithmetic_bench.wasm`, `simple_bench.wasm`) are examples and would need to be created separately for comprehensive benchmarking.
 
 ## 🏆 Performance Goals
 
@@ -49,23 +54,60 @@ The `wx` runtime aims to achieve competitive performance with industry-leading W
 
 ### Benchmark Scripts
 
-#### 1. Shell Script Benchmark Runner
+#### 1. Comprehensive Python Benchmark Suite (Recommended)
+```bash
+cd bench
+python3 benchmark.py
+```
+
+This is the **recommended** benchmark script. It:
+- Automatically discovers all WASM files in `bench/wasm/` and `examples/`
+- Tests wx, wasmer, and wasmtime (if available)
+- Runs each benchmark 5 times for accurate timing
+- Shows detailed comparisons and win rates
+- Handles missing runtimes gracefully
+
+#### 2. Shell Script Benchmark Runner
 ```bash
 cd bench
 ./run.sh
 ```
 
-This script benchmarks the `opcodes_cli.wasm` workload with `wx`, `wasmtime`, and `wasmer` (if available). It supports various WASI CLI operations like arithmetic, memory operations, and control flow.
+This script benchmarks the `opcodes_cli.wasm` workload with `wx`, `wasmtime`, and `wasmer` (if available). It supports various WASI CLI operations like arithmetic, memory operations, and control flow. Uses `hyperfine` if available for more accurate timing.
 
-#### 2. Extended Python Benchmark Suite
+#### 3. Legacy Extended Python Benchmark Suite
 ```bash
 # From project root:
 python3 bench_extended.py
 ```
 
-This Python script can benchmark multiple WASM files against wx, wasmer, and wasmtime. Note that it expects benchmark files in an `examples/` directory which would need to be created and populated with test WASM files.
+Legacy benchmark script. Use `bench/benchmark.py` instead for better error handling and automatic file discovery.
 
 ## 📊 Available Benchmarks
+
+### Benchmark Files
+
+The `bench/wasm/` directory contains several benchmark workloads:
+
+- **`arithmetic_bench.wasm`**: Heavy arithmetic operations (1M iterations)
+  - Tests: Multiplication, addition, loops
+  - Best for: Testing computation-heavy workloads
+
+- **`comprehensive_bench.wasm`**: Multi-feature benchmark
+  - Tests: Arithmetic, memory operations, conditionals, globals
+  - Best for: Overall runtime performance
+
+- **`compute_bench.wasm`**: Computational workload
+  - Tests: Complex calculations
+  - Best for: Testing optimization effectiveness
+
+- **`simple_bench.wasm`**: Basic operations
+  - Tests: Simple arithmetic and control flow
+  - Best for: Baseline performance testing
+
+- **`opcode_test_simple.wasm`**: Opcode coverage test
+  - Tests: Various WebAssembly opcodes (i32, i64, f32, f64)
+  - Best for: Opcode implementation verification
 
 ### Built-in Workload
 
@@ -102,10 +144,45 @@ To evaluate wx performance:
 
 ## 🎯 Benchmark Methodology
 
-- **Multiple Runs**: The shell script uses hyperfine (if available) to run benchmarks multiple times
+- **Multiple Runs**: Each benchmark runs 5 times and reports the average
 - **Identical Workloads**: All runtimes execute the same WASM bytecode
-- **Timed Execution**: Measures end-to-end execution time including WASI operations
-- **Comparison**: Results show relative performance of wx vs wasmtime vs wasmer
+- **Timed Execution**: Measures end-to-end execution time including startup
+- **Comparison**: Direct performance comparison showing speedup ratios
+- **Automatic Discovery**: Finds all `.wasm` files in bench/wasm and examples directories
+
+### Example Output
+
+```
+🚀 WebAssembly Runtime Benchmark Suite
+================================================================================
+
+📋 Checking runtime availability...
+  ✅ wx
+  ✅ wasmer
+  ✅ wasmtime
+
+📊 Benchmark: arithmetic_bench.wasm
+------------------------------------------------------------
+  ✅ wx           - 105.26ms
+  ✅ wasmer       - 156.43ms
+  ✅ wasmtime     - 178.92ms
+
+    🏆 wx is 1.49x FASTER than wasmer
+    🏆 wx is 1.70x FASTER than wasmtime
+
+📈 OVERALL PERFORMANCE SUMMARY
+================================================================================
+
+🏆 wx wins vs Wasmer:   6/6 benchmarks (100%)
+🏆 wx wins vs Wasmtime: 6/6 benchmarks (100%)
+
+📊 Average Execution Time:
+  wx:       23.45ms
+  wasmer:   35.12ms (1.50x vs wx)
+  wasmtime: 38.67ms (1.65x vs wx)
+
+🎉 TOTAL VICTORY! wx dominates ALL benchmarks! 🏆
+```
 
 ## 📋 Adding New Benchmarks
 
